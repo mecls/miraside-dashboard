@@ -1,0 +1,344 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Depleting bar under an undo toast — telegraphs the closing action window. */
+@keyframes toastbar {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+/* The bar is purely decorative — the JS timer still dismisses — so hide it for reduced-motion users. */
+@media (prefers-reduced-motion: reduce) {
+  .toast-countdown { display: none; }
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Supabase design-system tokens (dark-first). The Tailwind `neutral`/`accent`
+   scales are remapped to these values in tailwind.config.ts, so components keep
+   their class names but render the Supabase palette. These CSS vars document the
+   system and are used for the few raw-CSS surfaces (scrollbars, selection).
+   ──────────────────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+
+  --background: 0 0% 7.1%; /* #121212 app canvas */
+  --panel: 0 0% 9%; /* #171717 sidebar / panels */
+  --surface-100: 0 0% 12.2%; /* #1f1f1f cards */
+  --surface-200: 0 0% 14.1%; /* hover surface */
+  --border: 0 0% 18%; /* #2e2e2e */
+  --foreground: 0 0% 98%;
+  --muted: 0 0% 63.9%; /* #a3a3a3 */
+  --subtle: 0 0% 43.9%;
+  --brand: 153.1 60.2% 52.7%; /* #3ECF8E */
+  --brand-foreground: 0 0% 7%; /* near-black text on brand fills */
+}
+
+html,
+body {
+  @apply bg-neutral-950 text-neutral-100 antialiased;
+  /* Supabase Studio sets body { font-weight: 450 } — Inter variable supports it and it
+     gives text the slightly-sturdy Studio feel without reading as bold. */
+  font-weight: 450;
+}
+
+* {
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Brand-tinted text selection. */
+::selection {
+  background: hsl(var(--brand) / 0.9);
+  color: hsl(var(--brand-foreground));
+}
+
+/* Thin Supabase-style scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(0 0% 25%) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 25%);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 0% 32%);
+  background-clip: content-box;
+}
+
+/* Consistent brand-tinted focus ring on keyboard nav. */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--brand) / 0.6);
+}
+
+@layer components {
+  /* Signature Supabase micro-labels (see DESIGN-SYSTEM.md):
+     .mono-label — muted 11px kicker for stat labels, section kickers, table headers.
+     .mono-title — full-strength 12px title for card header strips. */
+  .mono-label {
+    @apply font-mono text-[11px] font-normal uppercase tracking-wider text-neutral-500;
+  }
+  .mono-title {
+    @apply font-mono text-xs font-normal uppercase tracking-wider text-neutral-100;
+  }
+}
+
+/* Keep browser autofill on-theme (no blue Chrome tint) — dark surface + light text. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill,
+select:-webkit-autofill {
+  -webkit-text-fill-color: hsl(var(--foreground));
+  -webkit-box-shadow: 0 0 0 1000px hsl(var(--surface-100)) inset;
+  caret-color: hsl(var(--foreground));
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+@keyframes loadbar {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(420%);
+  }
+}
+
+/* react-day-picker dark theme (Supabase green accent) */
+.rdp-root {
+  --rdp-accent-color: #3ecf8e;
+  --rdp-accent-background-color: #2e2e2e;
+  --rdp-today-color: #3ecf8e;
+  --rdp-day-width: 2rem;
+  --rdp-day-height: 2rem;
+  --rdp-day_button-width: 2rem;
+  --rdp-day_button-height: 2rem;
+  margin: 0;
+  color: #d4d4d4;
+}
+.rdp-month_caption,
+.rdp-caption_label {
+  color: #f5f5f5;
+}
+.rdp-weekday {
+  color: #737373;
+  font-weight: 500;
+}
+.rdp-chevron {
+  fill: #a3a3a3;
+}
+.rdp-day_button:hover {
+  background-color: #242424;
+}
+.rdp-selected .rdp-day_button {
+  color: #0a0a0a;
+  font-weight: 600;
+}
+.rdp-range_middle {
+  background-color: var(--rdp-accent-background-color);
+}
+.rdp-range_middle .rdp-day_button {
+  color: #f5f5f5;
+}
+
+/* Dual-range age slider (two overlapping range inputs share one track).
+   The input is sized to the thumb height (h-4 = 16px) and centered on the visual track line; the
+   runnable track is the same 16px so the thumb centers with margin-top:0 — no fragile offset hacks. */
+.range-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+  height: 16px;
+}
+.range-thumb::-webkit-slider-runnable-track { background: transparent; height: 16px; border: none; }
+.range-thumb::-moz-range-track { background: transparent; height: 16px; border: none; }
+.range-thumb::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  pointer-events: auto;
+  height: 16px;
+  width: 16px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid #3ECF8E;
+  cursor: pointer;
+  margin-top: 0;
+}
+.range-thumb::-moz-range-thumb {
+  pointer-events: auto;
+  height: 16px;
+  width: 16px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid #3ECF8E;
+  cursor: pointer;
+}
+
+/* ============================================================================
+   MOBILE (phones only, < 768px). Everything here is inside a max-width media
+   query, so the desktop and large-screen layouts are untouched BY CONSTRUCTION,
+   not by careful editing.
+
+   It stays the SAME TABLE, not a separate mobile component: one copy of the row
+   logic (call state, attempts, tasks, qualification, notes, meetings) with no
+   way for two versions to drift apart. On a phone it simply collapses to the
+   name column; tapping a lead opens the panel that holds everything else.
+   ============================================================================ */
+@media (max-width: 767px) {
+  /* The desktop min-width and the fixed column widths are what force sideways
+     scrolling on a phone. Neutralise both so the table fits the screen. */
+  .leads-table {
+    min-width: 0 !important;
+    table-layout: auto;
+  }
+  .leads-table col {
+    width: auto !important;
+  }
+  /* Column headers say nothing when there is one column. */
+  .leads-table thead {
+    display: none;
+  }
+  /* Collapse to the name. Every other cell carries a data-mlabel or data-mhide,
+     so this is exactly the non-Lead columns — their content lives in the panel
+     that opens on tap. */
+  .leads-table td[data-mlabel],
+  .leads-table td[data-mhide="1"] {
+    display: none;
+  }
+
+  /* A comfortable row to tap, and room for the name plus its chips. */
+  .leads-table > tbody > tr > td:nth-child(2) {
+    padding: 0.8125rem 0.5rem 0.8125rem 0.75rem !important;
+  }
+  /* The note chip is the one interactive control that survives the mobile collapse; give it a >=44px tap
+     area (WCAG 2.5.8) via a centred pseudo-element, WITHOUT changing its visual size, so a near-miss opens
+     notes instead of toggling the whole row. */
+  .note-chip {
+    position: relative;
+  }
+  .note-chip::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 44px;
+    height: 44px;
+  }
+  /* The opened panel needs real space under the name it belongs to. At 0 the call dropdown sat
+     flush against the row above, reading as one crowded block instead of a name and its detail. */
+  .leads-table > tbody > tr > td[colspan] {
+    padding: 0.875rem 0.75rem 1rem !important;
+  }
+
+  /* Touch targets inside the opened panel. min-height alone is ignored on an
+     inline element, which is why the links need inline-flex too. */
+  .leads-table td[colspan] button,
+  .leads-table td[colspan] select,
+  .leads-table td[colspan] a {
+    min-height: 40px;
+  }
+  .leads-table td[colspan] a {
+    display: inline-flex;
+    align-items: center;
+  }
+  /* ...except the small inline chips, which are read rather than pressed. */
+  .leads-table td[colspan] .m-chip,
+  .leads-table td[colspan] .m-chip button,
+  .leads-table td[colspan] .m-chip a {
+    min-height: 0;
+  }
+
+  /* The scroller has nothing left to scroll. */
+  .leads-scroll {
+    overflow-x: visible;
+  }
+}
+
+/* Respect the iPhone's notch and home indicator rather than sliding content under them. */
+@supports (padding: max(0px)) {
+  .safe-top {
+    padding-top: max(0px, env(safe-area-inset-top));
+  }
+  .safe-bottom {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  }
+  .safe-x {
+    padding-left: max(0px, env(safe-area-inset-left));
+    padding-right: max(0px, env(safe-area-inset-right));
+  }
+}
+
+/* Horizontal nav strip on phones: scrolls instead of overflowing the document. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+
+/* Ad-quality scoreboard on phones: collapse each ad into a card, same idea as the leads table.
+   Desktop is untouched — everything here is inside the max-width query. */
+@media (max-width: 767px) {
+  .ads-table,
+  .ads-table tbody,
+  .ads-table tr,
+  .ads-table td {
+    display: block;
+    width: auto;
+  }
+  .ads-table thead {
+    display: none;
+  }
+  .ads-scroll {
+    overflow-x: visible;
+  }
+  /* One card per ad. */
+  .ads-table > tbody > tr {
+    padding: 0.75rem 0.875rem;
+    border-bottom: 1px solid #232330;
+  }
+  .ads-table > tbody > tr:last-child {
+    border-bottom: 0;
+  }
+  /* The Ad cell (name + dot + thumb + last-lead) is the card header, full width. */
+  .ads-table td:first-child {
+    padding: 0 0 0.625rem !important;
+  }
+  .ads-table td:first-child .max-w-\[240px\] {
+    max-width: none;
+  }
+  /* Numbers laid out as a labelled two-column grid under the name. */
+  .ads-table td[data-mlabel] {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0.3125rem 0 !important;
+    text-align: left !important;
+    border-top: 1px solid #1c1c26;
+  }
+  .ads-table td[data-mlabel]::before {
+    content: attr(data-mlabel);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: #71717f;
+  }
+  .ads-table td[data-mhide="1"] {
+    display: none !important;
+  }
+  /* The rate bar sits right-aligned like the other values. */
+  .ads-table td[data-mlabel="Qualified rate"] > div {
+    justify-content: flex-end;
+  }
+}

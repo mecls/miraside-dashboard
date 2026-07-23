@@ -1,0 +1,12 @@
+# Never upload local env files. Vercel's own env handling is the source of truth in prod, and a
+# committed .env reaching the build both leaks secrets into the deployment and breaks the runtime:
+# Next 16.2's Vercel builder wires the function to read a .env that isn't in the bundle, so every
+# request dies with "failed to load env vars: EnvFileReadError(NotFound)". Keys live in `vercel env`.
+.env
+.env.*
+!.env.example
+
+# Local tooling / OS noise — no reason to ship it.
+.DS_Store
+tsconfig.tsbuildinfo
+.playwright-mcp/
