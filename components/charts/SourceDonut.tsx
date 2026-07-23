@@ -23,7 +23,7 @@ const SLICE_COLORS: Record<string, string> = {
   cold_email: "#F59E0B",
   organic: "#A78BFA",
   linkedin_dm: "#60A5FA",
-  direct: "#737373",
+  referral: "#F472B6",
 };
 const FALLBACK_COLOR = "#525252";
 
@@ -74,22 +74,22 @@ export function SourceDonut({ data, empty, format = "count" }: { data: SourceSli
   if (slices.total === 0) {
     return (
       <div>
-        <div className="relative mx-auto h-[200px] w-[200px]">
+        <div className="relative mx-auto h-[160px] w-[160px]">
           <svg viewBox="0 0 200 200" className="h-full w-full">
             <circle cx={100} cy={100} r={78} fill="none" stroke="#262626" strokeWidth={24} />
           </svg>
           <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
-            <div className={`${format === "eur" ? "text-2xl" : "text-3xl"} font-medium tabular-nums text-neutral-600`}>{fmt(0)}</div>
+            <div className={`${format === "eur" ? "text-lg" : "text-2xl"} font-medium tabular-nums text-neutral-600`}>{fmt(0)}</div>
             <div className="mono-label mt-0.5">total</div>
           </div>
         </div>
         <div className="mt-4">
           {data.map((s) => (
-            <div key={s.key} className="flex items-center gap-2.5 rounded px-2 py-1.5 text-sm opacity-60">
-              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: SLICE_COLORS[s.key] ?? FALLBACK_COLOR }} />
+            <div key={s.key} className="flex items-center gap-2.5 rounded px-1.5 py-1 text-xs opacity-60">
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: SLICE_COLORS[s.key] ?? FALLBACK_COLOR }} />
               <span className="min-w-0 flex-1 truncate text-neutral-400">{s.label}</span>
               <span className="tabular-nums font-medium text-neutral-500">{fmt(0)}</span>
-              <span className="w-10 text-right tabular-nums text-neutral-600">0%</span>
+              <span className="w-9 text-right tabular-nums text-neutral-600">0%</span>
             </div>
           ))}
         </div>
@@ -106,7 +106,7 @@ export function SourceDonut({ data, empty, format = "count" }: { data: SourceSli
   return (
     <div>
       {/* Donut + centre readout */}
-      <div className="relative mx-auto h-[200px] w-[200px]" onMouseLeave={() => setHovered(null)}>
+      <div className="relative mx-auto h-[160px] w-[160px]" onMouseLeave={() => setHovered(null)}>
         <svg viewBox="0 0 200 200" className="h-full w-full">
           {single ? (
             <circle
@@ -146,17 +146,17 @@ export function SourceDonut({ data, empty, format = "count" }: { data: SourceSli
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
           {active ? (
             <>
-              <div className={`${format === "eur" ? "text-2xl" : "text-3xl"} font-medium tabular-nums`} style={{ color: active.color }}>
+              <div className={`${format === "eur" ? "text-lg" : "text-2xl"} font-medium tabular-nums`} style={{ color: active.color }}>
                 {fmt(active.count)}
               </div>
               <div className="text-sm tabular-nums" style={{ color: active.color }}>
                 {Math.round(active.pct)}%
               </div>
-              <div className="max-w-[110px] truncate text-xs text-neutral-500">{active.label}</div>
+              <div className="max-w-[86px] truncate text-xs text-neutral-500">{active.label}</div>
             </>
           ) : (
             <>
-              <div className={`${format === "eur" ? "text-2xl" : "text-3xl"} font-medium tabular-nums text-neutral-50`}>{fmt(slices.total)}</div>
+              <div className={`${format === "eur" ? "text-lg" : "text-2xl"} font-medium tabular-nums text-neutral-50`}>{fmt(slices.total)}</div>
               <div className="mono-label mt-0.5">total</div>
             </>
           )}
@@ -170,15 +170,15 @@ export function SourceDonut({ data, empty, format = "count" }: { data: SourceSli
           return (
             <div
               key={s.key}
-              className={`flex items-center gap-2.5 rounded px-2 py-1.5 text-sm transition-colors duration-100 ${
+              className={`flex items-center gap-2.5 rounded px-1.5 py-1 text-xs transition-colors duration-100 ${
                 isActive ? "bg-neutral-800/70" : ""
               } ${hovered && !isActive ? "opacity-40" : ""}`}
               onMouseEnter={() => setHovered(s.key)}
             >
-              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: s.color }} />
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: s.color }} />
               <span className="min-w-0 flex-1 truncate text-neutral-200">{s.label}</span>
               <span className="tabular-nums font-medium text-neutral-50">{fmt(s.count)}</span>
-              <span className="w-10 text-right tabular-nums text-neutral-500">{Math.round(s.pct)}%</span>
+              <span className="w-9 text-right tabular-nums text-neutral-500">{Math.round(s.pct)}%</span>
             </div>
           );
         })}

@@ -157,7 +157,7 @@ export interface LeadView {
   matched: boolean;
   ghlContactUrl: string | null;
   answers: LeadAnswer[];
-  source: "instant_form" | "website" | "cold_call" | "cold_email" | "organic" | "linkedin_dm";
+  source: "instant_form" | "website" | "cold_call" | "cold_email" | "organic" | "linkedin_dm" | "referral";
   stage: "started" | "completed" | null; // website audit progress (null for instant forms)
   auditUrl: string | null; // the generated ROI audit's public URL (instant-form leads, via audit-intake)
 }

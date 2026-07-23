@@ -67,6 +67,9 @@ export interface GhlContact {
   tags: string[];
   /** GHL `dateAdded` — when the contact entered the CRM. A cold-call lead's "Submitted" date. */
   dateAdded: string | null;
+  /** Custom-field values keyed by field id — the "Lead Source" dropdown (source classification) reads
+   *  from here. Values arrive as strings/arrays depending on field type. */
+  customFields: Record<string, unknown>;
 }
 
 function ghlCfg(): { key: string; location: string } | null {
@@ -174,7 +177,15 @@ export async function fetchAllGhlContacts(): Promise<GhlContact[]> {
         [c.firstName, c.lastName].filter(Boolean).join(" ").trim() ||
         (c.name && String(c.name).trim()) ||
         null;
-      out.push({ id: String(c.id), name, phone: c.phone ?? null, email: c.email ?? null, tags: Array.isArray(c.tags) ? c.tags : [], dateAdded: c.dateAdded ? String(c.dateAdded) : null });
+      out.push({
+        id: String(c.id),
+        name,
+        phone: c.phone ?? null,
+        email: c.email ?? null,
+        tags: Array.isArray(c.tags) ? c.tags : [],
+        dateAdded: c.dateAdded ? String(c.dateAdded) : null,
+        customFields: Object.fromEntries((Array.isArray(c.customFields) ? c.customFields : []).map((f: any) => [String(f.id), f.value])),
+      });
     }
     const total: number | undefined = json?.total;
     if (contacts.length < PAGE_LIMIT) break;

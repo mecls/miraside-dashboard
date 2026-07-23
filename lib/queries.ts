@@ -164,9 +164,9 @@ export interface Dashboard {
   weekly: WeekPoint[];
   topCreatives: AdPerf[];
   funnelLeads: number;
-  /** Captured leads across EVERY channel (ads + outbound + direct) in the range — the CRM's own count,
-   *  deliberately separate from the Meta-reported `totals.leads`. */
-  allChannelLeads: { total: number; ads: number; outbound: number; direct: number };
+  /** Captured leads across EVERY channel in the range — the CRM's own count, deliberately separate
+   *  from the Meta-reported `totals.leads`. `other` = everything non-ad (cold/organic/referral/…). */
+  allChannelLeads: { total: number; ads: number; other: number };
   /** Median ms from an AD lead's creation to its first call attempt (null = nothing sampled in range). */
   speedToLead: { medianMs: number | null; sampled: number };
   /** Donut breakdowns per acquisition source, range-filtered by account-tz day. Same attribution
@@ -323,12 +323,16 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
   // classify by ATTRIBUTION, not funnel (mirrors the Leads tab's isAdLead) — a landing-page lead that
   // arrived via an ad click (fb_ad_id / channel "Paid Ads") IS an ad lead; Meta counts it, so must we,
   // or the "ads" number here reads lower than the Meta-reported tile above for no real reason.
-  const OUTBOUND_KEYS = new Set(["cold_call", "cold_email", "organic", "linkedin_dm"]);
+  // "Direct" is GONE as a bucket (Miguel, 2026-07-23 — "isn't direct basically organic?"): an
+  // unattributed website lead IS organic (found us on their own), unless its tracked channel says
+  // Referral. Tag-classified rows (cold_call/…/referral, from GHL tags) keep their own buckets.
+  const TAGGED_KEYS = new Set(["cold_call", "cold_email", "organic", "linkedin_dm", "referral"]);
   const sourceBucket = (l: { source: string | null; fb_ad_id: string | null; channel: string | null }): string => {
     const src = l.source ?? "instant_form";
-    if (OUTBOUND_KEYS.has(src)) return src;
+    if (TAGGED_KEYS.has(src)) return src;
     if (src === "instant_form" || !!l.fb_ad_id || l.channel === "Paid Ads") return "ads";
-    return "direct";
+    if (l.channel === "Referral") return "referral";
+    return "organic";
   };
   const SOURCE_LABELS: [string, string][] = [
     ["ads", "Ads"],
@@ -336,7 +340,7 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
     ["cold_email", "Cold email"],
     ["organic", "Organic"],
     ["linkedin_dm", "LinkedIn DMs"],
-    ["direct", "Direct"],
+    ["referral", "Referrals"],
   ];
   const leadsBySource = new Map<string, number>(SOURCE_LABELS.map(([k]) => [k, 0]));
   const meetingsBySource = new Map<string, number>(SOURCE_LABELS.map(([k]) => [k, 0]));
@@ -345,8 +349,6 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
   const leadBucket = new Map<string, string>();
   let allLeadsTotal = 0;
   let allLeadsAds = 0;
-  let allLeadsDirect = 0;
-  let allLeadsOutbound = 0;
   const stl: number[] = [];
   for (const l of leadRowsData) {
     const bucket = sourceBucket(l);
@@ -356,9 +358,7 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
     if (day < from || day > to) continue;
     allLeadsTotal++;
     leadsBySource.set(bucket, (leadsBySource.get(bucket) ?? 0) + 1);
-    if (OUTBOUND_KEYS.has(bucket)) {
-      allLeadsOutbound++;
-    } else if (bucket === "ads") {
+    if (bucket === "ads") {
       allLeadsAds++;
       // Speed-to-lead samples AD-ATTRIBUTED leads only — "how fast do we reply to paid leads"; a
       // cold-call lead's first dial is its creation, which would fake a 0-minute reply time.
@@ -366,8 +366,6 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
         const delta = new Date(l.first_call_at).getTime() - new Date(l.created_time).getTime();
         if (delta >= 0) stl.push(delta);
       }
-    } else {
-      allLeadsDirect++;
     }
   }
   stl.sort((a, b) => a - b);
@@ -689,7 +687,7 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
     weekly,
     topCreatives,
     funnelLeads: totals.leads,
-    allChannelLeads: { total: allLeadsTotal, ads: allLeadsAds, outbound: allLeadsOutbound, direct: allLeadsDirect },
+    allChannelLeads: { total: allLeadsTotal, ads: allLeadsAds, other: allLeadsTotal - allLeadsAds },
     speedToLead: { medianMs: speedToLeadMs, sampled: stl.length },
     bySource: {
       leads: SOURCE_LABELS.map(([key, label]) => ({ key, label, count: leadsBySource.get(key) ?? 0 })),

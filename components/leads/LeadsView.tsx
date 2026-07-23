@@ -1669,18 +1669,29 @@ function trusted(s: { qualified: number; unqualified: number }): boolean {
 /** A lead "came from an ad" if it carries an ad id, or its tracking tagged it as Paid Ads. Direct leads
  *  (people who just hit the URL, no ad tag) are NOT ad leads and must not pollute the per-ad breakdown. */
 function isAdLead(l: LeadView): boolean {
-  return !!l.adId || l.channel === "Paid Ads";
+  // source==="instant_form" included so this predicate is IDENTICAL to queries.ts sourceBucket's ads
+  // test — a hypothetical form lead missing adId+channel must not read Ads on Overview but Organic here.
+  return l.source === "instant_form" || !!l.adId || l.channel === "Paid Ads";
 }
-/** Scoreboard grouping key: ad id → ad name (id lost in tracking) → paid-but-unknown → direct (not from an ad). */
+/** Scoreboard grouping key: ad id → ad name (id lost in tracking) → paid-but-unknown → non-ad source. */
 /** Non-ad lead sources the Source column + filter know beyond ads. Keys are the filter bucket ids. */
 const OUTBOUND_SOURCES = [
   { key: "__cold__", source: "cold_call", label: "Cold call" },
   { key: "__cold_email__", source: "cold_email", label: "Cold email" },
   { key: "__organic__", source: "organic", label: "Organic" },
   { key: "__li__", source: "linkedin_dm", label: "LinkedIn DMs" },
+  { key: "__ref__", source: "referral", label: "Referrals" },
 ] as const;
-function outboundLabel(s: string): string {
-  return OUTBOUND_SOURCES.find((o) => o.source === s)?.label ?? "Cold call";
+/**
+ * The row's non-ad source entry, or null for ad leads. "Direct" is GONE as a bucket (Miguel, 2026-07-23
+ * — "isn't direct basically organic?"): an unattributed website lead IS organic (found us on their own),
+ * unless its tracked channel says Referral. Tag-sourced rows (cold_call/…/referral) match by source.
+ */
+function outboundFor(l: LeadView) {
+  const tagged = OUTBOUND_SOURCES.find((o) => o.source === l.source);
+  if (tagged) return tagged;
+  if (isAdLead(l)) return null;
+  return OUTBOUND_SOURCES.find((o) => o.key === (l.channel === "Referral" ? "__ref__" : "__organic__"))!;
 }
 /** Same 14px stroke-icon language as the rest of the app; LinkedIn is the one filled silhouette (like
  *  the WhatsApp glyph) because its mark doesn't read as strokes at this size. */
@@ -1709,6 +1720,17 @@ function OutboundIcon({ source, className }: { source: string; className?: strin
       </svg>
     );
   }
+  if (source === "referral") {
+    // Person + plus: someone brought them in.
+    return (
+      <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <line x1="19" y1="8" x2="19" y2="14" />
+        <line x1="22" y1="11" x2="16" y2="11" />
+      </svg>
+    );
+  }
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.1 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" />
@@ -1717,9 +1739,8 @@ function OutboundIcon({ source, className }: { source: string; className?: strin
 }
 
 function leadKey(l: LeadView): string {
-  const ob = OUTBOUND_SOURCES.find((o) => o.source === l.source);
-  if (ob) return ob.key; // outbound channels — their own buckets, never "Direct"
-  if (!isAdLead(l)) return "__direct__";
+  const ob = outboundFor(l);
+  if (ob) return ob.key; // every non-ad lead lands in a named source bucket (direct merged into organic)
   return l.adId ? `id:${l.adId}` : l.adName ? `name:${l.adName}` : "__paid_unknown__";
 }
 
@@ -1884,23 +1905,16 @@ export function LeadsView({
     return t;
   }, [leads]);
 
-  // "Quality by ad" counts ONLY leads that came from an ad. Direct leads (people who just hit the URL) are
-  // tallied separately so they never inflate an ad's lead count.
-  const { adStats, direct, outbound } = useMemo(() => {
+  // "Quality by ad" counts ONLY leads that came from an ad. Every non-ad lead lands in a named source
+  // bucket (cold call / cold email / organic / LinkedIn / referral — "direct" merged into organic,
+  // Miguel 2026-07-23), so nothing inflates an ad's lead count.
+  const { adStats, outbound } = useMemo(() => {
     const m = new Map<string, AdStat>();
-    const direct = { total: 0, qualified: 0, unqualified: 0, pending: 0 };
     const outbound = new Map<string, number>();
     for (const l of leads) {
-      // Outbound people (cold call / cold email / organic / LinkedIn) never touched an ad OR the site —
-      // their own tallies, so they inflate neither an ad's numbers nor the "Direct" bucket.
-      const ob = OUTBOUND_SOURCES.find((o) => o.source === l.source);
+      const ob = outboundFor(l);
       if (ob) {
         outbound.set(ob.key, (outbound.get(ob.key) ?? 0) + 1);
-        continue;
-      }
-      if (!isAdLead(l)) {
-        direct.total++;
-        direct[l.qualification]++;
         continue;
       }
       const key = leadKey(l);
@@ -1953,7 +1967,7 @@ export function LeadsView({
       if (ra !== rb) return scoreSort === "worst" ? ra - rb : rb - ra; // worst = lowest first; best = highest
       return decided(b) - decided(a); // equal rate → more decided leads ranks higher
     });
-    return { adStats: arr, direct, outbound };
+    return { adStats: arr, outbound };
   }, [leads, scoreSort, spendByAd]);
 
   // "Active only" hides ads Meta has already paused, so the board shows just what's still spending.
@@ -1970,11 +1984,10 @@ export function LeadsView({
 
   const adOptions = useMemo(() => {
     const opts = adStats.map((s) => ({ id: s.key, name: s.adName }));
-    if (direct.total > 0) opts.push({ id: "__direct__", name: `Direct AI-ROI Audit (${direct.total})` });
-    // Always listed, even at 0 — the outbound channels are selectable from day one (Miguel, 2026-07-22).
+    // Always listed, even at 0 — the non-ad sources are selectable from day one (Miguel, 2026-07-22).
     for (const o of OUTBOUND_SOURCES) opts.push({ id: o.key, name: `${o.label} (${outbound.get(o.key) ?? 0})` });
     return opts;
-  }, [adStats, direct, outbound]);
+  }, [adStats, outbound]);
 
   // A stale ?ad= (renamed ad, or its leads all deleted) points at a key no longer in the options — that
   // would silently empty the table. Fall back to "all" when the value isn't a real option.
@@ -3366,20 +3379,24 @@ const FragmentRow = memo(function FragmentRow({
           <>
             <td className="pl-6 pr-4 py-2.5" data-mlabel="Source">
               <div className="flex min-w-0 items-center gap-2">
-                {OUTBOUND_SOURCES.some((o) => o.source === lead.source) ? (
-                  // Same footprint as the ad thumbnail, but the channel's glyph — a blank grey square + an
-                  // AI-audit label made no sense for someone the team reached out to.
-                  <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded bg-neutral-800" title={outboundLabel(lead.source)}>
-                    <OutboundIcon source={lead.source} className="h-3.5 w-3.5 text-neutral-400" />
-                  </span>
-                ) : (
-                  <AdThumb thumb={lead.adThumbUrl} full={lead.adImageUrl} name={lead.adName} />
-                )}
-                <span className="truncate text-neutral-300" title={OUTBOUND_SOURCES.some((o) => o.source === lead.source) ? outboundLabel(lead.source) : lead.adName ?? undefined}>
-                  {OUTBOUND_SOURCES.some((o) => o.source === lead.source)
-                    ? outboundLabel(lead.source)
-                    : lead.adName || (isAdLead(lead) ? "Ad — unknown" : "Direct AI-ROI Audit")}
-                </span>
+                {(() => {
+                  // Every non-ad lead shows its source glyph + label (an unattributed website lead IS
+                  // Organic — "direct" is no longer a thing); only genuine ad leads show the creative.
+                  const ob = outboundFor(lead);
+                  return ob ? (
+                    <>
+                      <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded bg-neutral-800" title={ob.label}>
+                        <OutboundIcon source={ob.source} className="h-3.5 w-3.5 text-neutral-400" />
+                      </span>
+                      <span className="truncate text-neutral-300" title={ob.label}>{ob.label}</span>
+                    </>
+                  ) : (
+                    <>
+                      <AdThumb thumb={lead.adThumbUrl} full={lead.adImageUrl} name={lead.adName} />
+                      <span className="truncate text-neutral-300" title={lead.adName ?? undefined}>{lead.adName || "Ad — unknown"}</span>
+                    </>
+                  );
+                })()}
               </div>
             </td>
             <td className="px-4 py-2.5 whitespace-nowrap text-neutral-400" data-mlabel="Submitted">{fmtDate(lead.createdTime)}</td>

@@ -41,6 +41,7 @@ export async function pushLeadToGhl(lead: NormalizedLead, opts: { auditUrl?: str
     email: lead.email,
     website: lead.websiteOverride ?? undefined,
     label: composeLabel("Paid Ads", lead.adName),
+    channel: "Paid Ads",
     setConversion: true,
     adName: lead.adName,
     extraFields: answerFields,

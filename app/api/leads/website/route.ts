@@ -257,6 +257,7 @@ export async function POST(req: Request) {
         email: pushEmail,
         website: pushWebsite,
         label,
+        channel: attrChannel,
         setConversion: isCompleted, // Conversion Source only on the conversion
         adName,
         extraFields: answerFields,

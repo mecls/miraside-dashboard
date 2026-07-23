@@ -30,7 +30,7 @@ import {
   type GhlAppointment,
   type GhlTask,
 } from "../ghl";
-import { setContactTagState, completeContactTask, fetchOpportunitiesByContact, type GhlOpportunity } from "../ghl-write";
+import { setContactTagState, completeContactTask, fetchOpportunitiesByContact, listGhlFields, updateGhlContact, LEAD_SOURCE_FIELD, type GhlOpportunity } from "../ghl-write";
 import { attendanceFromGhl, leadNeedsRebooking, REBOOK_TASK_RE } from "../meetings";
 import { companyDomainFromEmail } from "../email-domain";
 import { extractCompanyName } from "../company-name";
@@ -38,6 +38,22 @@ import { extractCompanyName } from "../company-name";
 /** Booking statuses that mean "no call is coming", so the lead must be allowed back into the work
  *  queues. A no-show is the whole point: they owe us a rebook, not silence. */
 const DEAD_FOR_QUEUE = new Set(["noshow", "no-show", "cancelled", "canceled", "invalid"]);
+
+/** "Lead Source" dropdown option (lower-cased) → the lead's source classification. ONE system for
+ *  source (Miguel, 2026-07-23): the dropdown on the contact, not tags. "Paid Ads" on an imported
+ *  contact maps to source "website" so the ads bucket picks it up via channel. */
+const ORIGIN_TO_SOURCE: Record<string, { source: string; channel: string; detail: string }> = {
+  "cold call": { source: "cold_call", channel: "Cold Call", detail: "Cold outreach" },
+  "cold email": { source: "cold_email", channel: "Cold Email", detail: "Cold email outreach" },
+  "linkedin dms": { source: "linkedin_dm", channel: "LinkedIn DMs", detail: "LinkedIn outreach" },
+  organic: { source: "organic", channel: "Organic", detail: "Organic inbound" },
+  referral: { source: "referral", channel: "Referral", detail: "Referred lead" },
+  "paid ads": { source: "website", channel: "Paid Ads", detail: "Marked Paid Ads (Lead Source)" },
+};
+const originValueOf = (c: { customFields?: Record<string, unknown> } | undefined, fieldId: string | null): string =>
+  String((fieldId && c?.customFields?.[fieldId]) ?? "")
+    .toLowerCase()
+    .trim();
 
 export interface LeadsSyncSummary {
   forms: number;
@@ -394,6 +410,14 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
       if (lRows.length < 1000) break;
     }
     const tagsByContact = new Map(contacts.map((c) => [c.id, c.tags]));
+    // The "Lead Source" dropdown's field id — source classification reads it off each contact.
+    // Unresolvable (listing failed / field deleted) → imports default to cold call this cycle.
+    let originFieldId: string | null = null;
+    try {
+      originFieldId = (await listGhlFields()).find((f) => f.name.trim().toLowerCase() === LEAD_SOURCE_FIELD.toLowerCase())?.id ?? null;
+    } catch {
+      /* field listing failed — classify with defaults this cycle */
+    }
     // PRIMARY appointment source: one events sweep across every calendar (immune to the flaky
     // per-contact list — see fetchAppointmentsByContact). Null = sweep failed → per-contact fallback.
     let sweep: Map<string, SweepEvent[]> | null = null;
@@ -427,7 +451,7 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
           if (!rows) break;
           for (const r of rows as { id: string; ghl_contact_id: string; source: string | null; created_time: string | null; call_attempts: number | null }[]) {
             known.add(r.ghl_contact_id);
-            if (r.source === "cold_call" || r.source === "cold_email" || r.source === "organic" || r.source === "linkedin_dm") coldRows.push(r);
+            if (r.source === "cold_call" || r.source === "cold_email" || r.source === "organic" || r.source === "linkedin_dm" || r.source === "referral") coldRows.push(r);
           }
           if (rows.length < 1000) break;
         }
@@ -446,21 +470,45 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
             patch.last_call_attempt_at = added ?? new Date().toISOString();
             patch.first_call_at = added ?? new Date().toISOString();
           }
+          // Re-classification: the "Lead Source" dropdown is the source of truth — changing it in GHL
+          // moves the lead's source here within a cycle (imported rows only; ad leads are never touched:
+          // their attribution is Meta's, not a dropdown's).
+          const originRaw = originValueOf(contactById.get(r.ghl_contact_id), originFieldId);
+          const mapped = ORIGIN_TO_SOURCE[originRaw];
+          if (mapped && mapped.source !== r.source) {
+            patch.source = mapped.source;
+            patch.channel = mapped.channel;
+            patch.source_detail = mapped.detail;
+          }
+          // Empty dropdown on an existing imported row → fill it with the row's current source, so the
+          // contact always SHOWS its classification in GHL (one-time per row; next cycle reads it back).
+          if (!originRaw && originFieldId && contactById.has(r.ghl_contact_id)) {
+            const opt = { cold_call: "Cold Call", cold_email: "Cold Email", linkedin_dm: "LinkedIn DMs", organic: "Organic", referral: "Referral" }[r.source ?? ""];
+            if (opt) {
+              try {
+                await updateGhlContact(r.ghl_contact_id, { customFields: [{ id: originFieldId, value: opt }] });
+              } catch {
+                /* display-only back-fill */
+              }
+            }
+          }
           if (Object.keys(patch).length) await admin.from("leads").update(patch).eq("id", r.id);
         }
         for (const [contactId, events] of sweep) {
           if (known.has(contactId) || !events.length) continue;
           const c = contactById.get(contactId);
-          // Outbound-channel classification from the contact's GHL tags: the team tags contacts
-          // "cold email" / "linkedin" / "organic"; anything untagged is a cold call (the default motion).
-          const lowTags = (tagsByContact.get(contactId) ?? []).map((t: string) => t.toLowerCase().trim());
-          const ob = lowTags.some((t) => t.includes("cold email"))
-            ? { source: "cold_email", channel: "Cold Email", detail: "Cold email outreach" }
-            : lowTags.some((t) => t.includes("linkedin"))
-              ? { source: "linkedin_dm", channel: "LinkedIn DMs", detail: "LinkedIn outreach" }
-              : lowTags.some((t) => t.includes("organic"))
-                ? { source: "organic", channel: "Organic", detail: "Organic inbound" }
-                : { source: "cold_call", channel: "Cold Call", detail: "Cold outreach" };
+          // Source classification = the contact's "Lead Source" DROPDOWN, the one system for source
+          // (Miguel, 2026-07-23 — tags are out). Unset → cold call (the default motion), and the
+          // dropdown is filled back so GHL always SHOWS what the dashboard decided.
+          const originRaw = originValueOf(c, originFieldId);
+          const ob = ORIGIN_TO_SOURCE[originRaw] ?? { source: "cold_call", channel: "Cold Call", detail: "Cold outreach" };
+          if (!originRaw && originFieldId) {
+            try {
+              await updateGhlContact(contactId, { customFields: [{ id: originFieldId, value: "Cold Call" }] });
+            } catch {
+              /* display-only back-fill — classification already decided */
+            }
+          }
           // The row's appointment = the soonest upcoming event, else the latest past one (same intent as
           // pickRelevantAppointment); the meeting-history sweep below records ALL of them.
           const nowMs = Date.now();

@@ -13,7 +13,8 @@ import { getPrimaryTenantId } from "./tenant";
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
 export const AD_FIELD_NAME = "Anúncio";
-export const LEAD_SOURCE_FIELD = "Lead Source";
+// NOTE: "Lead Source" is the SINGLE_OPTIONS dropdown now (see LEAD_SOURCE_FIELD below) — the old TEXT
+// field of the same name was deleted 2026-07-23 on Miguel's instruction.
 export const CONVERSION_SOURCE_FIELD = "Conversion Source";
 // GHL's native additionalEmails/additionalPhones are read-only via the API (highlevel-api-docs #262),
 // so operator-entered secondary contact info lives in these custom fields instead.
@@ -21,6 +22,27 @@ export const ADDITIONAL_EMAIL_FIELD = "Additional Email";
 export const ADDITIONAL_PHONE_FIELD = "Additional Phone";
 // Mirror of leads.call_attempts (dashboard = source of truth) so the CRM shows how many times we dialed.
 export const CALL_ATTEMPTS_FIELD = "Call Attempts";
+// THE source dropdown (SINGLE_OPTIONS, "Lead Source", id CvfKtDgldrGobSuFBE4D — Miguel: one system for
+// source, a dropdown, not tags). Operators set it on imported contacts; automation fills it write-once
+// for ad/website leads. (GHL reserves the bare name "Source" for its native contact.source.)
+export const LEAD_SOURCE_FIELD = "Lead Source";
+export const LEAD_SOURCE_OPTIONS = ["Paid Ads", "Cold Call", "Cold Email", "LinkedIn DMs", "Organic", "Referral"] as const;
+
+/** Closest dropdown option for an attribution channel — what automation fills the dropdown with. */
+export function originOptionForChannel(channel: string | null | undefined): string {
+  switch (channel) {
+    case "Paid Ads":
+      return "Paid Ads";
+    case "Referral":
+      return "Referral";
+    case "Cold Email":
+      return "Cold Email";
+    case "LinkedIn":
+      return "LinkedIn DMs";
+    default:
+      return "Organic"; // YouTube / Instagram / X / Website / Direct / Other — found us on their own
+  }
+}
 
 export function ghlConfig() {
   const key = process.env.GHL_API_KEY;
@@ -466,7 +488,9 @@ export interface SourceWrite {
   phone?: string | null;
   email?: string | null;
   website?: string | null; // operator-set website; when absent the email-domain inference applies
-  label: string; // the "Channel — Detail" string
+  label: string; // the "Channel — Detail" string (→ Conversion Source on conversions)
+  /** The attribution channel alone — fills the "Lead Source" dropdown (write-once) via originOptionForChannel. */
+  channel?: string | null;
   setConversion: boolean; // true on the conversion (completed); false on started
   adName?: string | null; // → Anúncio
   extraFields?: Array<{ id: string; value: string }>; // e.g. the answer fields
@@ -474,11 +498,12 @@ export interface SourceWrite {
 }
 
 /**
- * Upsert a contact and write attribution: Conversion Source (when `setConversion`), Anúncio, any extra
- * fields, plus Lead Source written ONCE (first touch — never overwritten). Returns the contact id.
+ * Upsert a contact and write attribution: Conversion Source ("Channel — Detail", when `setConversion`),
+ * Anúncio, any extra fields, plus the Lead Source DROPDOWN written ONCE (first touch — never overwrites
+ * the operator's choice). The old free-text Lead Source field was deleted 2026-07-23 (Miguel): the
+ * detailed label now lives only on Conversion Source; the dropdown carries the channel option.
  */
 export async function writeContactWithSource(a: SourceWrite): Promise<string> {
-  const leadFieldId = await ensureField(LEAD_SOURCE_FIELD);
   const convFieldId = await ensureField(CONVERSION_SOURCE_FIELD);
 
   const fields: Array<{ id: string; value: string }> = [...(a.extraFields ?? [])];
@@ -496,14 +521,16 @@ export async function writeContactWithSource(a: SourceWrite): Promise<string> {
     tags: a.tags,
   });
 
-  // Lead Source = write-once first touch: set only when brand-new or currently empty.
-  const leadAlreadySet = customFields.some((f) => f.id === leadFieldId && f.value.trim());
-  let leadEmpty = !leadAlreadySet;
-  if (!isNew && !leadAlreadySet && customFields.length === 0) {
-    leadEmpty = await isFieldEmpty(id, leadFieldId); // upsert didn't echo fields — confirm before deciding
+  // Lead Source dropdown = write-once first touch: set only when brand-new or currently empty, so the
+  // operator's manual selection is never overwritten by automation.
+  const sourceFieldId = await ensureField(LEAD_SOURCE_FIELD);
+  const alreadySet = customFields.some((f) => f.id === sourceFieldId && f.value.trim());
+  let empty = !alreadySet;
+  if (!isNew && !alreadySet && customFields.length === 0) {
+    empty = await isFieldEmpty(id, sourceFieldId); // upsert didn't echo fields — confirm before deciding
   }
-  if (isNew || leadEmpty) {
-    await upsertContactRaw({ phone: a.phone, email: a.email, customFields: [{ id: leadFieldId, value: a.label }] });
+  if (isNew || empty) {
+    await upsertContactRaw({ phone: a.phone, email: a.email, customFields: [{ id: sourceFieldId, value: originOptionForChannel(a.channel) }] });
   }
   return id;
 }

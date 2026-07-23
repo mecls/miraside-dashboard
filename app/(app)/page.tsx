@@ -93,7 +93,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ f
           <Kpi
             label="Leads · All Channels"
             value={int(d.allChannelLeads.total)}
-            sub={`${d.allChannelLeads.ads} ads · ${d.allChannelLeads.outbound} outbound · ${d.allChannelLeads.direct} direct`}
+            sub={`${d.allChannelLeads.ads} ads · ${d.allChannelLeads.other} other sources`}
           />
           <Kpi
             label="Speed to Lead"
@@ -142,7 +142,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ f
 
       {/* Source mix — where leads, meetings, closes and revenue come from (all channels, this range).
           CAC + ROAS are ads-only NUMBERS, not breakdowns — they live in the KPI strip up top. */}
-      <section className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+      <section className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <SourceCard title="Leads by source">
           <SourceDonut data={d.bySource.leads} empty="No leads in range." />
         </SourceCard>
