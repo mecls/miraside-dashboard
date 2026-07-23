@@ -953,7 +953,7 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
     const retryBefore = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
     const { data: companyRows } = await admin
       .from("leads")
-      .select("id, email, email_override, website_override")
+      .select("id, email, email_override, website_override, ghl_contact_id")
       .eq("tenant_id", tenantId)
       .is("deleted_at", null)
       .is("company", null)
@@ -966,6 +966,15 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
       const company = await extractCompanyName(site);
       // `.is(company, null)`: never clobber a name someone set while this loop ran.
       await admin.from("leads").update({ company, company_fetched_at: new Date().toISOString() }).eq("id", r.id).is("company", null);
+      // Mirror into GHL's native Company Name so the CRM shows it too. Extraction only runs while the
+      // local company is NULL (first touch), so this can't overwrite an operator's manual value there.
+      if (company && r.ghl_contact_id && ghlOn) {
+        try {
+          await updateGhlContact(r.ghl_contact_id as string, { companyName: company });
+        } catch {
+          /* display mirror only — the dashboard value is saved either way */
+        }
+      }
     }
   } catch (e) {
     console.warn("company extraction failed:", e instanceof Error ? e.message : e);

@@ -209,6 +209,7 @@ export async function updateGhlContact(
     lastName?: string;
     name?: string; // full-name form, used when reverting to Meta's original (no first/last split known)
     website?: string;
+    companyName?: string; // GHL's NATIVE company field — the dashboard's Company column mirrors into it
     customFields?: Array<{ id: string; value: string }>;
   }
 ): Promise<void> {
@@ -219,6 +220,7 @@ export async function updateGhlContact(
   if (patch.lastName !== undefined) body.lastName = patch.lastName;
   if (patch.name !== undefined) body.name = patch.name;
   if (patch.website !== undefined) body.website = patch.website;
+  if (patch.companyName !== undefined) body.companyName = patch.companyName;
   if (patch.customFields?.length) body.customFields = patch.customFields;
   if (Object.keys(body).length === 0) return;
   await ghlFetch(`/contacts/${encodeURIComponent(contactId)}`, { method: "PUT", body: JSON.stringify(body) });

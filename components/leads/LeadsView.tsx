@@ -2768,6 +2768,7 @@ const FragmentRow = memo(function FragmentRow({
   const [confirming, setConfirming] = useState(false);
   const [alsoGhl, setAlsoGhl] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [editingCompany, setEditingCompany] = useState(false); // Company cell's inline editor
   // Optimistic local state for the qualify / call toggles — resynced to props after each server refresh.
   const [qual, setQual] = useState<Qualification>(lead.qualification);
   const [call, setCall] = useState<CallState>(lead.callState);
@@ -3143,7 +3144,7 @@ const FragmentRow = memo(function FragmentRow({
       return "Save failed.";
     }
   }
-  const saveField = (key: "phone" | "email" | "website" | "additionalEmail" | "additionalPhone", value: string) => saveFields({ [key]: value });
+  const saveField = (key: "phone" | "email" | "website" | "additionalEmail" | "additionalPhone" | "company", value: string) => saveFields({ [key]: value });
   const totalCols = 10; // the colgroup emits 10 columns in both the audit and non-audit variants
   const section = sectionKey ? QUEUE_SECTIONS.find((x) => x.key === sectionKey) ?? null : null;
   return (
@@ -3244,12 +3245,37 @@ const FragmentRow = memo(function FragmentRow({
             )}
           </div>
         </td>
-        {/* Company — extracted from the lead's website by the sync; sits right after the name. */}
+        {/* Company — extracted from the lead's website by the sync; sits right after the name.
+            Click-to-edit: saves locally AND into GHL's native Company Name field (Miguel, 2026-07-23);
+            a manual value wins over the extractor forever. */}
         <td className="px-4 py-2.5 text-neutral-300" data-mlabel="Company" onClick={stop}>
-          {lead.company ? (
-            <span className="block truncate" title={lead.company}>{lead.company}</span>
+          {editingCompany ? (
+            <input
+              autoFocus
+              defaultValue={lead.company ?? ""}
+              maxLength={120}
+              placeholder="Company name"
+              className={EDIT_INPUT_CLASS}
+              onBlur={(e) => {
+                setEditingCompany(false);
+                const v = e.target.value.trim();
+                if (v !== (lead.company ?? "")) void saveField("company", v);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                if (e.key === "Escape") setEditingCompany(false); // unmount without blur-save
+              }}
+            />
           ) : (
-            <span className="text-neutral-600">—</span>
+            <button
+              type="button"
+              className="group/comp flex w-full min-w-0 items-center gap-1.5 text-left"
+              title={lead.company ? `${lead.company} — click to edit` : "Set the company"}
+              onClick={(e) => { stop(e); setEditingCompany(true); }}
+            >
+              <span className="min-w-0 truncate">{lead.company || <span className="text-neutral-600">—</span>}</span>
+              <PencilIcon className="h-3 w-3 shrink-0 text-neutral-600 opacity-0 transition-opacity group-hover/comp:opacity-100" />
+            </button>
           )}
         </td>
         {/* Phone. onClick={stop} so selecting/copying the number no longer toggles the row open.
