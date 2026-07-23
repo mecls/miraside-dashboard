@@ -41,6 +41,13 @@ body {
   font-weight: 450;
 }
 
+/* Reserve the vertical scrollbar's space PERMANENTLY. Without this, a filter/tab change that leaves
+   fewer rows than a screenful removes the scrollbar, the centered page widens by its width, and every
+   column — most visibly the Lead names — slides sideways a few pixels (Miguel, 2026-07-23). */
+html {
+  scrollbar-gutter: stable;
+}
+
 * {
   -webkit-font-smoothing: antialiased;
 }
