@@ -62,7 +62,12 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ f
         <SectionLabel>This period</SectionLabel>
         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
           <Kpi label="Ad Spend" value={eur(d.totals.spend)} />
-          <Kpi label="Leads" value={int(d.totals.leads)} sub="Meta-reported, this range" />{/* distinct from the Leads page's all-time captured records (C44) */}
+          {/* CAPTURED ad leads — the CRM's truth (Miguel, 2026-07-23). Meta's counter is the sub. */}
+          <Kpi
+            label="Leads"
+            value={int(d.totals.leads)}
+            sub={d.metaReportedLeads === d.totals.leads ? "captured ad leads · matches Meta" : `captured ad leads · Meta counts ${int(d.metaReportedLeads)}`}
+          />
           <Kpi
             label="Cost / Lead"
             value={d.totals.cpl == null ? "—" : eur(d.totals.cpl)}

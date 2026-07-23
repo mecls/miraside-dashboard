@@ -164,9 +164,12 @@ export interface Dashboard {
   weekly: WeekPoint[];
   topCreatives: AdPerf[];
   funnelLeads: number;
-  /** Captured leads across EVERY channel in the range — the CRM's own count, deliberately separate
-   *  from the Meta-reported `totals.leads`. `other` = everything non-ad (cold/organic/referral/…). */
+  /** Captured leads across EVERY channel in the range. `other` = everything non-ad. NOTE: since
+   *  2026-07-23 `totals.leads` ALSO counts captured ad leads (= `.ads` here) — Meta's own counter
+   *  lives in `metaReportedLeads`. */
   allChannelLeads: { total: number; ads: number; other: number };
+  /** Meta's own lead counter for the range — reference only (the KPI sub); never a denominator. */
+  metaReportedLeads: number;
   /** Median ms from an AD lead's creation to its first call attempt (null = nothing sampled in range). */
   speedToLead: { medianMs: number | null; sampled: number };
   /** Donut breakdowns per acquisition source, range-filtered by account-tz day. Same attribution
@@ -349,12 +352,18 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
   const leadBucket = new Map<string, string>();
   let allLeadsTotal = 0;
   let allLeadsAds = 0;
+  // CRM ad leads per account-tz day over the WIDER week-aligned window — feeds the weekly chart with
+  // captured counts (Miguel, 2026-07-23: the CRM is the truth, not Meta's advertising counter).
+  const crmAdsByDay = new Map<string, number>();
   const stl: number[] = [];
   for (const l of leadRowsData) {
     const bucket = sourceBucket(l);
     leadBucket.set(l.id, bucket);
     if (!l.created_time) continue;
     const day = dateInTz(l.created_time, tz ?? "UTC");
+    if (bucket === "ads" && day >= weekDataFrom && day <= weekDataTo) {
+      crmAdsByDay.set(day, (crmAdsByDay.get(day) ?? 0) + 1);
+    }
     if (day < from || day > to) continue;
     allLeadsTotal++;
     leadsBySource.set(bucket, (leadsBySource.get(bucket) ?? 0) + 1);
@@ -583,6 +592,16 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
     .sort((a, b) => b.spend - a.spend);
 
   const totals = computeTotals(ads, minResults);
+  // The topline counts CAPTURED ad leads — the CRM's truth — not Meta's advertising counter (Miguel,
+  // 2026-07-23: "I want the accurate number; I don't care about Meta's counter"). CPL and conversion
+  // rate divide by the same captured count so every headline number shares one denominator. Meta's own
+  // figure survives as `metaReportedLeads` for the KPI's reference sub only. Per-ad numbers in the
+  // Ads-Manager drill-down stay Meta's (they mirror Ads Manager by design).
+  const metaReportedLeads = totals.leads;
+  totals.leads = allLeadsAds;
+  const enoughCaptured = allLeadsAds >= minResults;
+  totals.cpl = enoughCaptured && allLeadsAds > 0 ? totals.spend / allLeadsAds : null;
+  totals.convRate = enoughCaptured && totals.linkClicks > 0 ? (allLeadsAds / totals.linkClicks) * 100 : null;
 
   // Campaign summaries (date-scoped).
   const campMap = new Map<string, CampaignSummary>();
@@ -653,8 +672,15 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
   for (const r of weekData) {
     const wk = isoWeek(r.date);
     const s = weekSums.get(wk) ?? { leads: 0, spend: 0 };
-    s.leads += Number(r.fb_leads ?? 0);
     s.spend += Number(r.spend ?? 0);
+    weekSums.set(wk, s);
+  }
+  // Weekly LEADS come from the CRM's captured ad leads (crmAdsByDay), not Meta's counter — same truth
+  // as the topline Leads KPI. Spend stays Meta's (it's the only source of spend).
+  for (const [day, n] of crmAdsByDay) {
+    const wk = isoWeek(day);
+    const s = weekSums.get(wk) ?? { leads: 0, spend: 0 };
+    s.leads += n;
     weekSums.set(wk, s);
   }
   const weekly: WeekPoint[] = [];
@@ -688,6 +714,7 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
     topCreatives,
     funnelLeads: totals.leads,
     allChannelLeads: { total: allLeadsTotal, ads: allLeadsAds, other: allLeadsTotal - allLeadsAds },
+    metaReportedLeads,
     speedToLead: { medianMs: speedToLeadMs, sampled: stl.length },
     bySource: {
       leads: SOURCE_LABELS.map(([key, label]) => ({ key, label, count: leadsBySource.get(key) ?? 0 })),
