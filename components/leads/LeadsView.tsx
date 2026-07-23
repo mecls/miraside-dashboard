@@ -2769,6 +2769,9 @@ const FragmentRow = memo(function FragmentRow({
   const [alsoGhl, setAlsoGhl] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [editingCompany, setEditingCompany] = useState(false); // Company cell's inline editor
+  // Optimistic company while its PATCH (incl. the GHL write) is in flight; undefined = show the prop.
+  const [pendingCompany, setPendingCompany] = useState<string | null | undefined>(undefined);
+  const shownCompany = pendingCompany !== undefined ? pendingCompany : lead.company;
   // Optimistic local state for the qualify / call toggles — resynced to props after each server refresh.
   const [qual, setQual] = useState<Qualification>(lead.qualification);
   const [call, setCall] = useState<CallState>(lead.callState);
@@ -3145,6 +3148,33 @@ const FragmentRow = memo(function FragmentRow({
     }
   }
   const saveField = (key: "phone" | "email" | "website" | "additionalEmail" | "additionalPhone" | "company", value: string) => saveFields({ [key]: value });
+  // Company gets its own save path: optimistic display + toast on failure + a PATCH-overlay success
+  // (no full-table refresh) — the generic saveFields would show the stale name for the whole GHL round
+  // trip and silently swallow errors (review finds).
+  async function saveCompany(v: string): Promise<string | null> {
+    setPendingCompany(v || null);
+    try {
+      const res = await fetch(`/api/leads/${lead.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ company: v }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.ok) {
+        setPendingCompany(undefined);
+        toast(j?.error || "Couldn't save the company.", "error");
+        return j?.error || "Couldn't save the company.";
+      }
+      if (j.note) toast(j.note);
+      onSaved(null, { company: v || null });
+      setPendingCompany(undefined);
+      return null;
+    } catch {
+      setPendingCompany(undefined);
+      toast("Couldn't save the company.", "error");
+      return "Couldn't save the company.";
+    }
+  }
   const totalCols = 10; // the colgroup emits 10 columns in both the audit and non-audit variants
   const section = sectionKey ? QUEUE_SECTIONS.find((x) => x.key === sectionKey) ?? null : null;
   return (
@@ -3252,14 +3282,14 @@ const FragmentRow = memo(function FragmentRow({
           {editingCompany ? (
             <input
               autoFocus
-              defaultValue={lead.company ?? ""}
+              defaultValue={shownCompany ?? ""}
               maxLength={120}
               placeholder="Company name"
               className={EDIT_INPUT_CLASS}
               onBlur={(e) => {
                 setEditingCompany(false);
                 const v = e.target.value.trim();
-                if (v !== (lead.company ?? "")) void saveField("company", v);
+                if (v !== (shownCompany ?? "")) void saveCompany(v);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -3270,10 +3300,10 @@ const FragmentRow = memo(function FragmentRow({
             <button
               type="button"
               className="group/comp flex w-full min-w-0 items-center gap-1.5 text-left"
-              title={lead.company ? `${lead.company} — click to edit` : "Set the company"}
+              title={shownCompany ? `${shownCompany} — click to edit` : "Set the company"}
               onClick={(e) => { stop(e); setEditingCompany(true); }}
             >
-              <span className="min-w-0 truncate">{lead.company || <span className="text-neutral-600">—</span>}</span>
+              <span className="min-w-0 truncate">{shownCompany || <span className="text-neutral-600">—</span>}</span>
               <PencilIcon className="h-3 w-3 shrink-0 text-neutral-600 opacity-0 transition-opacity group-hover/comp:opacity-100" />
             </button>
           )}
@@ -3984,6 +4014,16 @@ const FragmentRow = memo(function FragmentRow({
                   </div>
                 )}
                 <div className="flex flex-wrap items-center gap-x-8 gap-y-2 border-t border-neutral-800/70 pt-3">
+                  {/* Company here too: the table column is hidden on phones, and the expanded panel is
+                      the documented home of hidden-column content (review find). */}
+                  <InlineEditField
+                    label="Company"
+                    value={shownCompany}
+                    placeholder="—"
+                    type="text"
+                    dense
+                    onSave={(v) => saveCompany(v)}
+                  />
                   <InlineEditField
                     label="Additional email"
                     value={lead.additionalEmail}
@@ -4199,7 +4239,7 @@ function InlineEditField({
    *  it render exactly as before. */
   actions?: (shown: string) => ReactNode;
   placeholder: string;
-  type: "email" | "tel" | "url";
+  type: "email" | "tel" | "url" | "text";
   /** Required contact field: when empty, the add-prompt shows in red so the gap stands out. */
   required?: boolean;
   /** Compact single-line variant for rarely-filled extras (label + value + pencil on one quiet line). */

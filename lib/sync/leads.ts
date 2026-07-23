@@ -964,11 +964,21 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
       const site = (r.website_override as string | null) ?? companyDomainFromEmail((r.email_override as string | null) ?? (r.email as string | null));
       if (!site) continue; // no known website — nothing to stamp; picked up whenever one appears
       const company = await extractCompanyName(site);
-      // `.is(company, null)`: never clobber a name someone set while this loop ran.
-      await admin.from("leads").update({ company, company_fetched_at: new Date().toISOString() }).eq("id", r.id).is("company", null);
-      // Mirror into GHL's native Company Name so the CRM shows it too. Extraction only runs while the
-      // local company is NULL (first touch), so this can't overwrite an operator's manual value there.
-      if (company && r.ghl_contact_id && ghlOn) {
+      // `.is(company, null)`: never clobber a name someone set while this loop ran. `.select("id")`
+      // reports whether OUR write actually landed — the GHL mirror below must not fire off a no-op
+      // (review find: a manual PATCH racing the slow homepage fetch kept its local value but still got
+      // its GHL companyName replaced by the extracted one).
+      const { data: wrote } = await admin
+        .from("leads")
+        .update({ company, company_fetched_at: new Date().toISOString() })
+        .eq("id", r.id)
+        .is("company", null)
+        .select("id");
+      // Mirror into GHL's native Company Name so the CRM shows it too — but ONLY when GHL's own field
+      // is empty: a company typed directly into the CRM outranks the extractor (review find; the local
+      // null-guard alone can't see CRM-side values).
+      const ghlHasCompany = !!contacts.find((ct) => ct.id === r.ghl_contact_id)?.companyName;
+      if (company && wrote?.length && r.ghl_contact_id && ghlOn && !ghlHasCompany) {
         try {
           await updateGhlContact(r.ghl_contact_id as string, { companyName: company });
         } catch {

@@ -492,8 +492,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         // Clearing an override reverts the GHL contact to what Meta originally delivered (when known).
         ...(has("phone") ? { phone: phone ?? lead.phone ?? undefined } : {}),
         ...(has("email") ? { email: email ?? lead.email ?? undefined } : {}),
-        // Company mirrors into GHL's NATIVE companyName field; clearing empties it there too.
-        ...(has("company") ? { companyName: company ?? "" } : {}),
+        // Company mirrors into GHL's NATIVE companyName field. A clear sends NULL — GHL silently
+        // ignores "" (200, value kept; live-tested 2026-07-23), which would have left the two diverged.
+        ...(has("company") ? { companyName: company } : {}),
         ...websiteWrite,
         // Name: set → explicit first/last split (operator decides which words are which).
         //       both cleared → revert to Meta's original full name, split deterministically.

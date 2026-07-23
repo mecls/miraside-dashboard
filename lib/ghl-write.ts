@@ -209,7 +209,10 @@ export async function updateGhlContact(
     lastName?: string;
     name?: string; // full-name form, used when reverting to Meta's original (no first/last split known)
     website?: string;
-    companyName?: string; // GHL's NATIVE company field — the dashboard's Company column mirrors into it
+    // GHL's NATIVE company field — the dashboard's Company column mirrors into it. To CLEAR it send
+    // null, NOT "": live-tested 2026-07-23 — GHL returns 200 for an empty string but silently keeps
+    // the old value; null actually empties the field.
+    companyName?: string | null;
     customFields?: Array<{ id: string; value: string }>;
   }
 ): Promise<void> {
