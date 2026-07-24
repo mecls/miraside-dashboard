@@ -205,6 +205,7 @@ export async function fetchLeadViews(admin: SupabaseClient, tenantId: string): P
       opportunityStatus: (r as any).opportunity_status ?? null,
       lastCallAttemptAt: r.last_call_attempt_at ?? null,
       matched: !!r.ghl_contact_id,
+      ghlContactId: r.ghl_contact_id ?? null,
       ghlContactUrl: ghlUrl(r.ghl_contact_id),
       answers: (r.answers ?? []) as LeadAnswer[],
       source: (r.source as LeadView["source"]) ?? "instant_form",

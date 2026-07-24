@@ -155,6 +155,7 @@ export interface LeadView {
   /** >0 when this person appears more than once (same phone or email) — 2 means one duplicate. */
   duplicateCount: number; // GHL notes on the contact; drives the row's note chip (reconciled when notes are viewed)
   matched: boolean;
+  ghlContactId: string | null; // raw GHL contact id — joins a lead to its opportunity on the Pipeline board
   ghlContactUrl: string | null;
   answers: LeadAnswer[];
   source: "instant_form" | "website" | "cold_call" | "cold_email" | "organic" | "linkedin_dm" | "referral";
