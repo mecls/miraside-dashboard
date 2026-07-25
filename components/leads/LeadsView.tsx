@@ -2028,8 +2028,12 @@ export function LeadsView({
     const needleDigits = needle.replace(/\D/g, "");
     const arr = leads.filter((l) => {
       if (status !== "all" && l.qualification !== status) return false;
-      if (adFilter !== "all" && leadKey(l) !== adFilter) return false;
-      if (callFilter !== "all" && l.callState !== callFilter) return false;
+      // Source + call-status are LEADS-VIEW-ONLY filters (their dropdowns only render there). Their state
+      // must never leak into the Tasks queue or the Ad-quality board — those are separate lenses (Miguel,
+      // 2026-07-25: "if I pick Meeting Booked on Leads it shouldn't filter Tasks"). The Ad board reads raw
+      // `leads` already; this scopes the queue too.
+      if (view === "leads" && adFilter !== "all" && leadKey(l) !== adFilter) return false;
+      if (view === "leads" && callFilter !== "all" && l.callState !== callFilter) return false;
       // "To call" = NOT YET CALLED, full stop. Miguel's rule (2026-07-20): the ONLY thing that takes a
       // lead off the call queue / amber rail is moving the Call dropdown off "Not called". Qualification
       // must NOT — he often qualifies straight from the form answers without ever dialing — and a booked
