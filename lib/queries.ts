@@ -350,6 +350,10 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
   // Bucket for EVERY non-deleted lead (not range-clipped): a meeting inside the range can belong to a
   // lead created before it, and it still needs its source.
   const leadBucket = new Map<string, string>();
+  // Lead ids whose CREATION day falls in [from,to] — this period's cohort. The meetings donut counts a
+  // booked call for a lead in this set (see below), so the two donuts read as one funnel instead of the
+  // meetings donut clipping by the meeting's scheduled date (which hid every upcoming booking).
+  const leadsInRange = new Set<string>();
   let allLeadsTotal = 0;
   let allLeadsAds = 0;
   // CRM ad leads per account-tz day over the WIDER week-aligned window — feeds the weekly chart with
@@ -365,6 +369,7 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
       crmAdsByDay.set(day, (crmAdsByDay.get(day) ?? 0) + 1);
     }
     if (day < from || day > to) continue;
+    leadsInRange.add(l.id);
     allLeadsTotal++;
     leadsBySource.set(bucket, (leadsBySource.get(bucket) ?? 0) + 1);
     if (bucket === "ads") {
@@ -380,11 +385,15 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
   stl.sort((a, b) => a - b);
   const speedToLeadMs = stl.length ? stl[Math.floor(stl.length / 2)] : null;
 
-  // Meetings donut: every booking whose start day falls in the range, credited to its lead's source.
-  // A meeting of a deleted lead has no bucket and is skipped (matches every other lead metric).
+  // Meetings donut: mirrors the Leads donut — one entry per lead in THIS period's cohort that has booked
+  // a call, by that lead's source. Counting by the meeting's own start day (the old behaviour) hid every
+  // upcoming booking, so cold calls booked weeks ahead showed 1-of-5 instead of 5 (Miguel, 2026-07-26: a
+  // cold-call lead IS a booked call). Deduped per lead so it lines up with the Leads count and the
+  // per-deal closes below (a rebooked lead is still one "booked" in the funnel).
   // Along the way, collect each lead's close moment from a Won outcome (outcome_set_at = when the
   // operator ruled it; starts_at as a legacy fallback).
   const wonMeetingAt = new Map<string, string>();
+  const countedMeetingLead = new Set<string>();
   for (const m of meetingRowsData) {
     const bucket = leadBucket.get(m.lead_id);
     if (!bucket) continue;
@@ -392,10 +401,10 @@ export async function getDashboard(opts: { from?: string; to?: string } = {}): P
       const at = m.outcome_set_at ?? m.starts_at;
       if (at && (!wonMeetingAt.has(m.lead_id) || at < wonMeetingAt.get(m.lead_id)!)) wonMeetingAt.set(m.lead_id, at);
     }
-    if (!m.starts_at) continue;
-    const day = dateInTz(m.starts_at, tz ?? "UTC");
-    if (day < from || day > to) continue;
-    meetingsBySource.set(bucket, (meetingsBySource.get(bucket) ?? 0) + 1);
+    if (leadsInRange.has(m.lead_id) && !countedMeetingLead.has(m.lead_id)) {
+      countedMeetingLead.add(m.lead_id);
+      meetingsBySource.set(bucket, (meetingsBySource.get(bucket) ?? 0) + 1);
+    }
   }
 
   // Closes + revenue, by the CLOSE day (not the lead's creation day — a June lead closed in July is a
