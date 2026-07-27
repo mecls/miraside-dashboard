@@ -2541,7 +2541,7 @@ export function LeadsView({
             onClick={() => setUncontactedOnly(!uncontactedOnly)}
             title="Leads whose Call dropdown is still 'Not called'. Schedule no-answer retries into Tasks via the prompt or the clock button."
             className={cn(
-              "inline-flex h-11 items-center gap-1.5 whitespace-nowrap rounded-md border px-3 text-xs font-medium transition-colors focus-visible:outline-none sm:h-7",
+              "inline-flex h-11 items-center gap-1.5 whitespace-nowrap rounded-md border px-3 text-xs font-medium transition-colors focus-visible:outline-none sm:h-[34px]",
               uncontactedOnly
                 ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
                 : "border-neutral-700 bg-surface-200 text-neutral-400 hover:border-neutral-600 hover:text-neutral-100"
