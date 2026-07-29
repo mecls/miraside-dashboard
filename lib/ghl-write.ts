@@ -209,6 +209,10 @@ export async function updateGhlContact(
     lastName?: string;
     name?: string; // full-name form, used when reverting to Meta's original (no first/last split known)
     website?: string;
+    // GHL's NATIVE company field — the dashboard's Company column mirrors into it. To CLEAR it send
+    // null, NOT "": live-tested 2026-07-23 — GHL returns 200 for an empty string but silently keeps
+    // the old value; null actually empties the field.
+    companyName?: string | null;
     customFields?: Array<{ id: string; value: string }>;
   }
 ): Promise<void> {
@@ -219,6 +223,7 @@ export async function updateGhlContact(
   if (patch.lastName !== undefined) body.lastName = patch.lastName;
   if (patch.name !== undefined) body.name = patch.name;
   if (patch.website !== undefined) body.website = patch.website;
+  if (patch.companyName !== undefined) body.companyName = patch.companyName;
   if (patch.customFields?.length) body.customFields = patch.customFields;
   if (Object.keys(body).length === 0) return;
   await ghlFetch(`/contacts/${encodeURIComponent(contactId)}`, { method: "PUT", body: JSON.stringify(body) });
@@ -368,6 +373,12 @@ export interface GhlOpportunity {
   pipelineId: string | null;
   pipelineStageId: string | null;
   createdAt: string | null;
+  /** The contact this deal belongs to — needed to join a pipeline board back to the dashboard's leads. */
+  contactId: string | null;
+  /** The contact's name as GHL carries it on the deal (fallback when no lead is linked). */
+  contactName: string | null;
+  /** Last time GHL touched the deal (stage move / edit) — the board's "last activity". */
+  updatedAt: string | null;
 }
 
 const mapOpportunity = (o: any): GhlOpportunity => ({
@@ -378,7 +389,61 @@ const mapOpportunity = (o: any): GhlOpportunity => ({
   pipelineId: o.pipelineId ? String(o.pipelineId) : null,
   pipelineStageId: o.pipelineStageId ? String(o.pipelineStageId) : null,
   createdAt: o.createdAt ? String(o.createdAt) : null,
+  contactId: o.contactId ? String(o.contactId) : o.contact?.id ? String(o.contact.id) : null,
+  contactName: o.contact?.name ? String(o.contact.name) : o.contact?.contactName ? String(o.contact.contactName) : null,
+  updatedAt: o.lastStageChangeAt ? String(o.lastStageChangeAt) : o.updatedAt ? String(o.updatedAt) : null,
 });
+
+/** One GHL pipeline and its ordered stages — the columns of a Pipeline kanban. */
+export interface GhlPipeline {
+  id: string;
+  name: string;
+  stages: { id: string; name: string; position: number }[];
+}
+
+/** Every pipeline in the location, each with its stages in board order. Powers the Pipeline tab's
+ *  columns + picker. (The stage list was previously fetched only inside moveOpportunityToWonStage.) */
+export async function listPipelines(): Promise<GhlPipeline[]> {
+  const c = ghlConfig();
+  if (!c) return [];
+  const j = await ghlFetch(`/opportunities/pipelines?locationId=${encodeURIComponent(c.location)}`, { method: "GET" });
+  return (j?.pipelines ?? []).map((p: any) => ({
+    id: String(p.id),
+    name: String(p.name ?? "Pipeline"),
+    stages: (p.stages ?? [])
+      .map((s: any, i: number) => ({ id: String(s.id), name: String(s.name ?? ""), position: typeof s.position === "number" ? s.position : i }))
+      .sort((a: { position: number }, b: { position: number }) => a.position - b.position),
+  }));
+}
+
+/** Every opportunity in one pipeline (paginated — GHL caps 100/page), mapped to GhlOpportunity with the
+ *  contact object kept. This is the board's card set: a faithful mirror of the GHL pipeline. */
+export async function listOpportunitiesInPipeline(pipelineId: string): Promise<GhlOpportunity[]> {
+  const c = ghlConfig();
+  if (!c) return [];
+  const out: GhlOpportunity[] = [];
+  const LIMIT = 100;
+  const MAX_PAGES = 25; // safety cap (2,500 deals)
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const j = await ghlFetch(
+      `/opportunities/search?location_id=${encodeURIComponent(c.location)}&pipeline_id=${encodeURIComponent(pipelineId)}&limit=${LIMIT}&page=${page}`,
+      { method: "GET" }
+    );
+    const opps: any[] = j?.opportunities ?? [];
+    for (const o of opps) out.push(mapOpportunity(o));
+    if (opps.length < LIMIT) break;
+  }
+  return out;
+}
+
+/** Move an opportunity to an arbitrary pipeline stage. Unlike moveOpportunityToWonStage this THROWS on
+ *  failure, so a drag-to-move UI can revert the card when GHL rejects the write. */
+export async function moveOpportunityToStage(opportunityId: string, pipelineId: string, stageId: string): Promise<void> {
+  await ghlFetch(`/opportunities/${encodeURIComponent(opportunityId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ pipelineId, pipelineStageId: stageId }),
+  });
+}
 
 /** Every opportunity attached to a contact (usually 0 or 1). */
 export async function fetchOpportunitiesByContact(contactId: string): Promise<GhlOpportunity[]> {
@@ -425,10 +490,7 @@ export async function moveOpportunityToWonStage(opp: { id: string; pipelineId: s
     const pipeline = (j?.pipelines ?? []).find((p: any) => String(p.id) === opp.pipelineId);
     const won = (pipeline?.stages ?? []).find((s: any) => String(s.name ?? "").trim().toLowerCase() === "won");
     if (!won?.id) return;
-    await ghlFetch(`/opportunities/${encodeURIComponent(opp.id)}`, {
-      method: "PUT",
-      body: JSON.stringify({ pipelineId: opp.pipelineId, pipelineStageId: String(won.id) }),
-    });
+    await moveOpportunityToStage(opp.id, opp.pipelineId, String(won.id));
   } catch {
     /* stage move is cosmetic — the won STATUS already landed */
   }

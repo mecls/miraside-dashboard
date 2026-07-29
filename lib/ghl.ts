@@ -67,6 +67,8 @@ export interface GhlContact {
   tags: string[];
   /** GHL `dateAdded` — when the contact entered the CRM. A cold-call lead's "Submitted" date. */
   dateAdded: string | null;
+  /** GHL's native company field — read so the sync's extractor mirror never clobbers a CRM-side value. */
+  companyName: string | null;
   /** Custom-field values keyed by field id — the "Lead Source" dropdown (source classification) reads
    *  from here. Values arrive as strings/arrays depending on field type. */
   customFields: Record<string, unknown>;
@@ -184,6 +186,7 @@ export async function fetchAllGhlContacts(): Promise<GhlContact[]> {
         email: c.email ?? null,
         tags: Array.isArray(c.tags) ? c.tags : [],
         dateAdded: c.dateAdded ? String(c.dateAdded) : null,
+        companyName: c.companyName ? String(c.companyName) : null,
         customFields: Object.fromEntries((Array.isArray(c.customFields) ? c.customFields : []).map((f: any) => [String(f.id), f.value])),
       });
     }

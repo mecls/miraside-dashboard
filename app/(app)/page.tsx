@@ -62,7 +62,9 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ f
         <SectionLabel>This period</SectionLabel>
         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
           <Kpi label="Ad Spend" value={eur(d.totals.spend)} />
-          <Kpi label="Leads" value={int(d.totals.leads)} sub="Meta-reported, this range" />{/* distinct from the Leads page's all-time captured records (C44) */}
+          {/* CAPTURED ad leads — the CRM's truth (Miguel, 2026-07-23). No reconciliation sub: the
+              CEO reads the number, not the plumbing. */}
+          <Kpi label="Leads" value={int(d.totals.leads)} />
           <Kpi
             label="Cost / Lead"
             value={d.totals.cpl == null ? "—" : eur(d.totals.cpl)}
@@ -90,15 +92,11 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ f
           />
           {/* All-channels pair, folded into the same grid (Miguel, 2026-07-23). The "Leads" box above
               stays Meta-reported — this one is the CRM's own capture count across every source. */}
-          <Kpi
-            label="Leads · All Channels"
-            value={int(d.allChannelLeads.total)}
-            sub={`${d.allChannelLeads.ads} ads · ${d.allChannelLeads.other} other sources`}
-          />
+          <Kpi label="Leads · All Channels" value={int(d.allChannelLeads.total)} />
           <Kpi
             label="Speed to Lead"
             value={d.speedToLead.medianMs == null ? "—" : fmtDuration(d.speedToLead.medianMs)}
-            sub={d.speedToLead.medianMs == null ? "no called ad leads in range" : `ad lead → first call · median of ${d.speedToLead.sampled}`}
+            sub={d.speedToLead.medianMs == null ? "no called ad leads in range" : "ad lead → first call"}
             tone={
               d.speedToLead.medianMs == null
                 ? undefined

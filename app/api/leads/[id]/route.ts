@@ -413,7 +413,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   };
   // A name edit always arrives as the first/last pair — treat either key as both being present.
   const hasName = has("firstName") || has("lastName");
-  if (!has("phone") && !has("email") && !hasName && !has("website") && !has("additionalEmail") && !has("additionalPhone")) {
+  if (!has("phone") && !has("email") && !hasName && !has("website") && !has("additionalEmail") && !has("additionalPhone") && !has("company")) {
     return NextResponse.json({ ok: false, error: "Nothing to update." }, { status: 400 });
   }
   const phone = clean("phone");
@@ -424,6 +424,10 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const website = websiteRaw ? normalizeWebsite(websiteRaw) : null;
   const additionalEmail = clean("additionalEmail");
   const additionalPhone = clean("additionalPhone");
+  const company = clean("company");
+  if (has("company") && company && company.length > 120) {
+    return NextResponse.json({ ok: false, error: "That company name is too long." }, { status: 400 });
+  }
 
   if (has("phone") && phone && !validPhone(phone)) {
     return NextResponse.json({ ok: false, error: "That phone number doesn't look valid." }, { status: 400 });
@@ -488,6 +492,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         // Clearing an override reverts the GHL contact to what Meta originally delivered (when known).
         ...(has("phone") ? { phone: phone ?? lead.phone ?? undefined } : {}),
         ...(has("email") ? { email: email ?? lead.email ?? undefined } : {}),
+        // Company mirrors into GHL's NATIVE companyName field. A clear sends NULL — GHL silently
+        // ignores "" (200, value kept; live-tested 2026-07-23), which would have left the two diverged.
+        ...(has("company") ? { companyName: company } : {}),
         ...websiteWrite,
         // Name: set → explicit first/last split (operator decides which words are which).
         //       both cleared → revert to Meta's original full name, split deterministically.
@@ -546,6 +553,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
   if (has("additionalEmail")) patch.additional_email = additionalEmail;
   if (has("additionalPhone")) patch.additional_phone = additionalPhone;
+  if (has("company")) {
+    // Manual value wins over the website extractor forever (its writes are guarded `.is(company, null)`).
+    // A CLEAR re-opens auto-extraction after the standard 7-day cooldown — stamping fetched_at now stops
+    // the very next sync from instantly re-adding the name the operator just removed.
+    patch.company = company;
+    patch.company_fetched_at = new Date().toISOString();
+  }
   let { error: upErr } = await admin.from("leads").update(patch).eq("tenant_id", tenantId).eq("id", id);
   if (upErr && ghlSynced) {
     // GHL already took the change; leaving phone_override/etc. unsaved would diverge the two systems and,

@@ -953,7 +953,7 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
     const retryBefore = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
     const { data: companyRows } = await admin
       .from("leads")
-      .select("id, email, email_override, website_override")
+      .select("id, email, email_override, website_override, ghl_contact_id")
       .eq("tenant_id", tenantId)
       .is("deleted_at", null)
       .is("company", null)
@@ -964,8 +964,27 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
       const site = (r.website_override as string | null) ?? companyDomainFromEmail((r.email_override as string | null) ?? (r.email as string | null));
       if (!site) continue; // no known website — nothing to stamp; picked up whenever one appears
       const company = await extractCompanyName(site);
-      // `.is(company, null)`: never clobber a name someone set while this loop ran.
-      await admin.from("leads").update({ company, company_fetched_at: new Date().toISOString() }).eq("id", r.id).is("company", null);
+      // `.is(company, null)`: never clobber a name someone set while this loop ran. `.select("id")`
+      // reports whether OUR write actually landed — the GHL mirror below must not fire off a no-op
+      // (review find: a manual PATCH racing the slow homepage fetch kept its local value but still got
+      // its GHL companyName replaced by the extracted one).
+      const { data: wrote } = await admin
+        .from("leads")
+        .update({ company, company_fetched_at: new Date().toISOString() })
+        .eq("id", r.id)
+        .is("company", null)
+        .select("id");
+      // Mirror into GHL's native Company Name so the CRM shows it too — but ONLY when GHL's own field
+      // is empty: a company typed directly into the CRM outranks the extractor (review find; the local
+      // null-guard alone can't see CRM-side values).
+      const ghlHasCompany = !!contacts.find((ct) => ct.id === r.ghl_contact_id)?.companyName;
+      if (company && wrote?.length && r.ghl_contact_id && ghlOn && !ghlHasCompany) {
+        try {
+          await updateGhlContact(r.ghl_contact_id as string, { companyName: company });
+        } catch {
+          /* display mirror only — the dashboard value is saved either way */
+        }
+      }
     }
   } catch (e) {
     console.warn("company extraction failed:", e instanceof Error ? e.message : e);
