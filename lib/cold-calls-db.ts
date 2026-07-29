@@ -7,6 +7,10 @@ import { dbRowToColdCall, dbRowToActivity, type ColdCallRow, type ColdCallActivi
 const CONTACT_COLS =
   "id, sheet_row, source_tab, first_name, last_name, full_name, role, tier, seniority, department, email, phone, country, person_linkedin, company_name, company_short_name, company_linkedin, website, industry_group, industry, niche, employees, company_size, call_status, assigned_user, notes, attempts, reached_decision_maker, last_outcome, last_attempt_at, next_follow_up_at";
 
+// The full field set for the single-contact detail (drawer). Adds the two long free-text columns the list
+// deliberately omits — fetched only when a contact is opened, so the ~1.4k-row list payload stays lean.
+const FULL_CONTACT_COLS = `${CONTACT_COLS}, company_about, company_industry_li`;
+
 /** All active contacts (paged past PostgREST's 1000-row cap), newest sheet order surfaced by name. */
 export async function fetchColdCallRows(admin: SupabaseClient, tenantId: string): Promise<ColdCallRow[]> {
   const rows: Record<string, unknown>[] = [];
@@ -29,6 +33,23 @@ export async function fetchColdCallRows(admin: SupabaseClient, tenantId: string)
   // the top, and the un-called rows follow as the live call queue.
   mapped.sort((a, b) => (a.callStatus !== "Not called" ? 0 : 1) - (b.callStatus !== "Not called" ? 0 : 1));
   return mapped;
+}
+
+/** One contact's full record (all roster fields, incl. the long free-text columns) for the detail drawer. */
+export async function fetchColdCallContact(
+  admin: SupabaseClient,
+  tenantId: string,
+  id: string
+): Promise<ColdCallRow | null> {
+  const { data, error } = await admin
+    .from("cold_call_contacts")
+    .select(FULL_CONTACT_COLS)
+    .eq("tenant_id", tenantId)
+    .eq("id", id)
+    .is("deleted_from_sheet_at", null)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data ? dbRowToColdCall(data as Record<string, unknown>) : null;
 }
 
 export async function fetchColdCallActivities(

@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getSheetsClient } from "@/lib/google-sheets";
+import { getSheetsClient, readTab } from "@/lib/google-sheets";
 import { COLD_CALLS_SHEET_ID, COLD_CALLS_TAB } from "@/lib/cold-calls";
 
 /**
@@ -116,6 +116,114 @@ export async function writeBackContact(c: WriteBackInput): Promise<WriteBackResu
     requestBody: { valueInputOption: "RAW", data },
   });
   return { ok: true, row };
+}
+
+/* -------------------------------------------------------------- bulk write-back */
+
+export type BatchPatch = { callStatus?: string; assignedUser?: string };
+export type BatchWriteResult = { written: number; skipped: { id: string; reason: string }[] };
+
+/**
+ * Mirror one call-state field (Call Status and/or Assigned User) to the sheet for MANY contacts at once.
+ *
+ * Unlike looping writeBackContact (which does several Sheets reads per contact), this reads the tab ONCE to
+ * build a key→row map, resolves every selected contact against it, then issues a SINGLE values.batchUpdate.
+ * Best-effort like the single-row path: it never throws — contacts that can't be matched (no key / missing /
+ * duplicate rows) are returned in `skipped`, and a failed sheet read/write reports the whole set as skipped.
+ * The DB is already updated by the caller and stays the source of truth.
+ */
+export async function batchWriteBack(
+  admin: SupabaseClient,
+  tenantId: string,
+  ids: string[],
+  patch: BatchPatch
+): Promise<BatchWriteResult> {
+  const skipped: { id: string; reason: string }[] = [];
+  if (ids.length === 0 || (patch.callStatus === undefined && patch.assignedUser === undefined)) {
+    return { written: 0, skipped };
+  }
+
+  // 1. Read the whole tab once; index the key columns and build a key → sheet-row map.
+  let header: string[];
+  let rows: unknown[][];
+  try {
+    const tab = await readTab(COLD_CALLS_SHEET_ID, COLD_CALLS_TAB);
+    header = tab.header;
+    rows = tab.rows;
+  } catch (e) {
+    console.warn("cold-calls batch write-back: sheet read failed:", e instanceof Error ? e.message : String(e));
+    return { written: 0, skipped: ids.map((id) => ({ id, reason: "sheet read failed" })) };
+  }
+
+  const colIdx: ColMap = {};
+  header.forEach((h, i) => (colIdx[h] = i));
+  const at = (row: unknown[], name: string) => (colIdx[name] != null ? s(row[colIdx[name]]) : "");
+
+  const keyToRow = new Map<string, number | "ambiguous">();
+  rows.forEach((row, idx) => {
+    const key = keyOf(at(row, "Email"), at(row, "Phone"), at(row, "Person LinkedIn"));
+    if (!key) return;
+    keyToRow.set(key, keyToRow.has(key) ? "ambiguous" : idx + 2); // +2: header + 1-based
+  });
+
+  // 2. Load the selected contacts' match fields from the DB (chunked to keep the request URL small).
+  const contacts: { id: string; email: string; phone: string; personLinkedin: string }[] = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const { data, error } = await admin
+      .from("cold_call_contacts")
+      .select("id, email, phone, person_linkedin")
+      .eq("tenant_id", tenantId)
+      .in("id", chunk);
+    if (error) {
+      console.warn("cold-calls batch write-back: contact read failed:", error.message);
+      return { written: 0, skipped: ids.map((id) => ({ id, reason: "contact read failed" })) };
+    }
+    for (const r of (data ?? []) as Record<string, unknown>[]) {
+      contacts.push({ id: s(r.id), email: s(r.email), phone: s(r.phone), personLinkedin: s(r.person_linkedin) });
+    }
+  }
+
+  // 3. Resolve each contact to its row and stage the changed cell(s).
+  const data: { range: string; values: string[][] }[] = [];
+  const writtenIds: string[] = [];
+  for (const c of contacts) {
+    const key = keyOf(c.email, c.phone, c.personLinkedin);
+    if (!key) { skipped.push({ id: c.id, reason: "no key (email/phone/linkedin) to match on" }); continue; }
+    const hit = keyToRow.get(key);
+    if (hit == null) { skipped.push({ id: c.id, reason: "contact not found in the sheet" }); continue; }
+    if (hit === "ambiguous") { skipped.push({ id: c.id, reason: "duplicate rows match this contact in the sheet" }); continue; }
+    const put = (name: string, value: string) => {
+      if (colIdx[name] == null) return;
+      data.push({ range: `'${COLD_CALLS_TAB}'!${colLetter(colIdx[name])}${hit}`, values: [[value]] });
+    };
+    if (patch.callStatus !== undefined) put("Call Status", patch.callStatus);
+    if (patch.assignedUser !== undefined) put("Assigned User", patch.assignedUser);
+    writtenIds.push(c.id);
+  }
+
+  // 4. One batched write, then stamp pushed_at on the rows that landed (sheet_row self-heals on next sync).
+  if (data.length > 0) {
+    try {
+      await getSheetsClient("write").spreadsheets.values.batchUpdate({
+        spreadsheetId: COLD_CALLS_SHEET_ID,
+        requestBody: { valueInputOption: "RAW", data },
+      });
+    } catch (e) {
+      console.warn("cold-calls batch write-back: sheet write failed:", e instanceof Error ? e.message : String(e));
+      return { written: 0, skipped: [...skipped, ...writtenIds.map((id) => ({ id, reason: "sheet write failed" }))] };
+    }
+    const now = new Date().toISOString();
+    for (let i = 0; i < writtenIds.length; i += 200) {
+      await admin
+        .from("cold_call_contacts")
+        .update({ pushed_at: now })
+        .eq("tenant_id", tenantId)
+        .in("id", writtenIds.slice(i, i + 200));
+    }
+  }
+
+  return { written: writtenIds.length, skipped };
 }
 
 /**

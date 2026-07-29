@@ -36,6 +36,10 @@ export function ColdCallDrawer({
   const [activities, setActivities] = useState<ColdCallActivity[] | null>(null);
   const [notes, setNotes] = useState(contact.notes);
   const [busy, setBusy] = useState(false);
+  // Render instantly from the list row, then enrich with the full record (adds the long free-text columns
+  // the list omits — Company About / LinkedIn industry) once the on-open fetch resolves.
+  const [full, setFull] = useState<ColdCallRow>(contact);
+  const [loadingFull, setLoadingFull] = useState(true);
 
   // Log-call form.
   const [outcome, setOutcome] = useState<string>("");
@@ -60,6 +64,18 @@ export function ColdCallDrawer({
       .catch(() => { if (live) setActivities([]); });
     return () => { live = false; };
   }, [contact.id]);
+
+  useEffect(() => {
+    let live = true;
+    setFull(contact);
+    setLoadingFull(true);
+    fetch(`/api/cold-calls/${contact.id}`)
+      .then((r) => r.json())
+      .then((d) => { if (live && d?.contact) setFull(d.contact as ColdCallRow); })
+      .catch(() => {})
+      .finally(() => { if (live) setLoadingFull(false); });
+    return () => { live = false; };
+  }, [contact]);
 
   async function patch(bodyObj: Record<string, unknown>, okMsg: string) {
     setBusy(true);
@@ -111,7 +127,8 @@ export function ColdCallDrawer({
   }
 
   const repOptions = [{ value: "", label: "Unassigned" }, ...reps.map((r) => ({ value: r, label: r }))];
-  const website = contact.website ? contact.website.replace(/^https?:\/\//, "") : "";
+  const website = full.website ? full.website.replace(/^https?:\/\//, "") : "";
+  const showShort = full.companyShortName && full.companyShortName !== full.companyName;
 
   return (
     <div className="fixed inset-0 z-40">
@@ -154,18 +171,46 @@ export function ColdCallDrawer({
             </div>
           </div>
 
-          {/* facts */}
+          {/* contact facts */}
           <div className="rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-2">
             <Row label="Phone">
-              {contact.phone ? <a href={`tel:${contact.phone}`} className="tabular-nums text-neutral-200 hover:text-accent">{contact.phone}</a> : null}
+              {full.phone ? <a href={`tel:${full.phone}`} className="tabular-nums text-neutral-200 hover:text-accent">{full.phone}</a> : null}
             </Row>
-            <Row label="Email">{contact.email ? <a href={`mailto:${contact.email}`} className="hover:text-sky-400">{contact.email}</a> : null}</Row>
-            <Row label="LinkedIn">{contact.personLinkedin ? <a href={contact.personLinkedin} target="_blank" rel="noreferrer" className="text-sky-400 hover:underline">Profile ↗</a> : null}</Row>
-            <Row label="Website">{website ? <a href={`https://${website}`} target="_blank" rel="noreferrer" className="hover:text-sky-400">{website}</a> : null}</Row>
-            <Row label="Industry">{[contact.niche, contact.industry].filter(Boolean).join(" · ")}</Row>
-            <Row label="Segment">{[contact.industryGroup, contact.companySize && `${contact.companySize} emp`, contact.country].filter(Boolean).join(" · ")}</Row>
-            <Row label="Attempts">{contact.attempts ? `${contact.attempts}${contact.lastAttemptAt ? ` · last ${fmt(contact.lastAttemptAt)}` : ""}` : null}</Row>
+            <Row label="Email">{full.email ? <a href={`mailto:${full.email}`} className="hover:text-sky-400">{full.email}</a> : null}</Row>
+            <Row label="LinkedIn">{full.personLinkedin ? <a href={full.personLinkedin} target="_blank" rel="noreferrer" className="text-sky-400 hover:underline">Profile ↗</a> : null}</Row>
+            <Row label="Role">{full.role}</Row>
+            <Row label="Seniority">{full.seniority}</Row>
+            <Row label="Tier">{full.tier}</Row>
+            <Row label="Department">{full.department}</Row>
+            <Row label="Attempts">{full.attempts ? `${full.attempts}${full.lastAttemptAt ? ` · last ${fmt(full.lastAttemptAt)}` : ""}` : null}</Row>
           </div>
+
+          {/* company facts */}
+          <div className="rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-2">
+            <Row label="Company">{full.companyName}</Row>
+            <Row label="Short name">{showShort ? full.companyShortName : null}</Row>
+            <Row label="Company LI">{full.companyLinkedin ? <a href={full.companyLinkedin} target="_blank" rel="noreferrer" className="text-sky-400 hover:underline">Company ↗</a> : null}</Row>
+            <Row label="Website">{website ? <a href={`https://${website}`} target="_blank" rel="noreferrer" className="hover:text-sky-400">{website}</a> : null}</Row>
+            <Row label="Industry group">{full.industryGroup}</Row>
+            <Row label="Industry">{full.industry}</Row>
+            <Row label="Niche">{full.niche}</Row>
+            <Row label="LI industry">{full.companyIndustryLi}</Row>
+            <Row label="Employees">{full.employees ? full.employees.toLocaleString() : null}</Row>
+            <Row label="Company size">{full.companySize}</Row>
+            <Row label="Country">{full.country}</Row>
+          </div>
+
+          {/* company about (long free text — lazy-loaded with the full record) */}
+          {(full.companyAbout || loadingFull) && (
+            <div>
+              <div className="mono-label mb-1">About {full.companyName || "company"}</div>
+              {full.companyAbout ? (
+                <p className="whitespace-pre-wrap text-xs leading-relaxed text-neutral-400">{full.companyAbout}</p>
+              ) : loadingFull ? (
+                <div className="text-xs text-neutral-600">Loading…</div>
+              ) : null}
+            </div>
+          )}
 
           {/* log a call */}
           <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">

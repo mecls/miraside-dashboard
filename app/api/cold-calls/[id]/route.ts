@@ -3,6 +3,7 @@ import { createServerSupabase } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getPrimaryTenantId } from "@/lib/tenant";
 import { mirrorCallState } from "@/lib/cold-calls-writeback";
+import { fetchColdCallContact } from "@/lib/cold-calls-db";
 import { CALL_STATUSES } from "@/lib/cold-calls";
 
 export const runtime = "nodejs";
@@ -11,6 +12,31 @@ export const maxDuration = 30;
 const MAX_NOTE = 5000;
 const MAX_NAME = 120;
 const STATUS_SET = new Set<string>(CALL_STATUSES as readonly string[]);
+
+/** Full record for the detail drawer — includes the long free-text columns the list omits. */
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const sb = await createServerSupabase();
+  const {
+    data: { user },
+  } = await sb.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const tenantId = await getPrimaryTenantId();
+  if (!tenantId) return NextResponse.json({ ok: false, error: "No tenant configured." }, { status: 400 });
+
+  const { id } = await params;
+  if (!id) return NextResponse.json({ ok: false, error: "Missing contact id." }, { status: 400 });
+
+  try {
+    const admin = createAdminClient();
+    const contact = await fetchColdCallContact(admin, tenantId, id);
+    if (!contact) return NextResponse.json({ ok: false, error: "Contact not found." }, { status: 404 });
+    return NextResponse.json({ ok: true, contact });
+  } catch (e) {
+    console.error("GET /api/cold-calls read failed:", e instanceof Error ? e.message : String(e));
+    return NextResponse.json({ ok: false, error: "Failed to load contact." }, { status: 500 });
+  }
+}
 
 /**
  * Edit a contact's dashboard-owned call state (Call Status / Assigned User / Notes) and mirror it back to

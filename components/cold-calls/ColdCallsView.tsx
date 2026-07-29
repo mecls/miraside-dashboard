@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppSelect, type AppSelectOption } from "@/components/AppSelect";
 import { Kpi, cn, BTN } from "@/components/ui";
@@ -48,6 +48,7 @@ const DIMENSIONS: { key: DimKey; label: string }[] = [
 ];
 
 const PAGE = 100;
+const UNASSIGN = "__unassign__"; // sentinel for the bulk "Unassign" option (distinct from the "" placeholder)
 
 export function ColdCallsView({ contacts, syncedAt }: { contacts: ColdCallRow[]; syncedAt: string | null }) {
   const router = useRouter();
@@ -64,6 +65,10 @@ export function ColdCallsView({ contacts, syncedAt }: { contacts: ColdCallRow[];
   const [selected, setSelected] = useState<ColdCallRow | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [lastIndex, setLastIndex] = useState<number | null>(null); // anchor row for shift-click ranges
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const selectAllRef = useRef<HTMLInputElement>(null);
 
   const reps = useMemo(
     () => [...new Set([...KNOWN_REPS, ...contacts.map((c) => c.assignedUser).filter(Boolean)])].sort(),
@@ -125,6 +130,71 @@ export function ColdCallsView({ contacts, syncedAt }: { contacts: ColdCallRow[];
   }, [filtered]);
 
   const visible = filtered.slice(0, limit);
+  const allFilteredSelected = filtered.length > 0 && filtered.every((c) => selectedIds.has(c.id));
+
+  // Drop any selected ids that no longer exist after a refresh (e.g. removed from the sheet).
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(contacts.map((c) => c.id));
+      const next = new Set([...prev].filter((id) => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [contacts]);
+
+  // Header checkbox shows the "some but not all" indeterminate dash.
+  useEffect(() => {
+    const el = selectAllRef.current;
+    if (el) el.indeterminate = selectedIds.size > 0 && !allFilteredSelected;
+  }, [selectedIds, allFilteredSelected]);
+
+  function toggleAll(checked: boolean) {
+    setSelectedIds(checked ? new Set(filtered.map((c) => c.id)) : new Set());
+    setLastIndex(null);
+  }
+
+  function onRowCheck(index: number, id: string, shiftKey: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (shiftKey && lastIndex !== null) {
+        const [lo, hi] = [Math.min(lastIndex, index), Math.max(lastIndex, index)];
+        for (let i = lo; i <= hi; i++) next.add(visible[i].id); // fill the whole range
+      } else if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+    setLastIndex(index);
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setLastIndex(null);
+  }
+
+  async function bulkApply(patch: { callStatus?: string; assignedUser?: string }) {
+    if (selectedIds.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const r = await fetch("/api/cold-calls/bulk", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: [...selectedIds], ...patch }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || "Bulk update failed");
+      const skipped = d.writeback?.skipped?.length ?? 0;
+      toast(`Updated ${d.updated}${skipped ? ` · ${skipped} not written to sheet` : ""}`, skipped ? "error" : "success");
+      clearSelection();
+      router.refresh();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Bulk update failed", "error");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   async function runSync() {
     setSyncing(true);
@@ -213,11 +283,52 @@ export function ColdCallsView({ contacts, syncedAt }: { contacts: ColdCallRow[];
             {(q || status || rep || group || niche || size || toCall) && <button onClick={resetFilters} className={BTN.ghost}>Clear</button>}
           </div>
 
+          {selectedIds.size > 0 && (
+            <div className="flex flex-wrap items-center gap-3 rounded-md border border-accent/40 bg-accent/10 px-3 py-2">
+              <span className="text-xs font-medium tabular-nums text-accent">{selectedIds.size} selected</span>
+              {bulkBusy ? (
+                <span className="text-xs text-neutral-400">Updating…</span>
+              ) : (
+                <>
+                  <AppSelect
+                    value=""
+                    placeholder="Assign rep…"
+                    options={[
+                      { value: "", label: "Assign rep…" },
+                      ...reps.map((r) => ({ value: r, label: r })),
+                      { value: UNASSIGN, label: "Unassign" },
+                    ]}
+                    onChange={(v) => bulkApply({ assignedUser: v === UNASSIGN ? "" : v })}
+                    className="h-8 min-w-[150px]"
+                  />
+                  <AppSelect
+                    value=""
+                    placeholder="Set status…"
+                    options={[{ value: "", label: "Set status…" }, ...CALL_STATUSES.map((s) => ({ value: s, label: s, dot: statusDot(s) }))]}
+                    onChange={(v) => bulkApply({ callStatus: v })}
+                    className="h-8 min-w-[150px]"
+                  />
+                  <button onClick={clearSelection} className={BTN.ghost}>Clear</button>
+                </>
+              )}
+            </div>
+          )}
+
           <div className="overflow-x-auto rounded-lg border border-neutral-800 bg-neutral-900 shadow-xs">
             <table className="min-w-full text-sm">
               <thead className="border-b border-neutral-800 bg-panel">
                 <tr>
-                  <th className={cn(th, "pl-5")}>Contact</th>
+                  <th className={cn(th, "w-8 pl-5 pr-2")}>
+                    <input
+                      ref={selectAllRef}
+                      type="checkbox"
+                      checked={allFilteredSelected}
+                      onChange={(e) => toggleAll(e.target.checked)}
+                      className="h-3.5 w-3.5 cursor-pointer accent-accent align-middle"
+                      aria-label="Select all"
+                    />
+                  </th>
+                  <th className={th}>Contact</th>
                   <th className={th}>Company</th>
                   <th className={th}>Industry / Niche</th>
                   <th className={th}>Phone</th>
@@ -226,9 +337,19 @@ export function ColdCallsView({ contacts, syncedAt }: { contacts: ColdCallRow[];
                 </tr>
               </thead>
               <tbody>
-                {visible.map((c) => (
-                  <tr key={c.id} className={cn("group border-b border-neutral-800 last:border-0 hover:bg-surface-200/40", busyId === c.id && "opacity-60")}>
-                    <td className={cn(td, "pl-5")}>
+                {visible.map((c, i) => (
+                  <tr key={c.id} className={cn("group border-b border-neutral-800 last:border-0 hover:bg-surface-200/40", selectedIds.has(c.id) && "bg-accent/[0.06]", busyId === c.id && "opacity-60")}>
+                    <td className={cn(td, "w-8 pl-5 pr-2")} onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(c.id)}
+                        onClick={(e) => onRowCheck(i, c.id, e.shiftKey)}
+                        onChange={() => {}}
+                        className="h-3.5 w-3.5 cursor-pointer accent-accent align-middle"
+                        aria-label={`Select ${c.fullName || "contact"}`}
+                      />
+                    </td>
+                    <td className={td}>
                       <button onClick={() => setSelected(c)} className="text-left font-medium text-neutral-100 hover:text-accent">
                         {c.fullName || "—"}
                       </button>
@@ -269,7 +390,7 @@ export function ColdCallsView({ contacts, syncedAt }: { contacts: ColdCallRow[];
                     </td>
                   </tr>
                 ))}
-                {visible.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-neutral-500">No contacts match these filters.</td></tr>}
+                {visible.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-neutral-500">No contacts match these filters.</td></tr>}
               </tbody>
             </table>
           </div>
