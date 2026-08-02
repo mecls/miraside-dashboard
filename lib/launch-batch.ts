@@ -20,7 +20,7 @@ export function friendlyError(raw: string): string {
 /** Kick the self-chaining batch processor (best-effort, a few retries). Hits the stable public alias so it's
  *  never blocked by Vercel deployment protection; the job lives in the DB, so any deployment can process it. */
 export async function triggerProcess(): Promise<void> {
-  const base = process.env.LAUNCH_BASE_URL || "https://miraside-dashboard.vercel.app";
+  const base = process.env.LAUNCH_BASE_URL || "https://dashboard.miraside.co";
   const secret = process.env.SYNC_TRIGGER_SECRET || "";
   for (let i = 0; i < 3; i++) {
     try {

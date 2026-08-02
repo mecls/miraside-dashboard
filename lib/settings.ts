@@ -10,7 +10,7 @@ import { getPrimaryTenantId } from "./tenant";
 
 // Hard fallbacks if a setting row is somehow missing — NEVER the privacy page for a destination.
 export const DEFAULT_WEBSITE_URL = "https://miraside.co";
-export const DEFAULT_PRIVACY_URL = "https://miraside-dashboard.vercel.app/privacy";
+export const DEFAULT_PRIVACY_URL = "https://dashboard.miraside.co/privacy";
 
 /** Resolve the current values (override → default) for the given setting keys. */
 export async function getSettingValues(
