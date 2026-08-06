@@ -77,7 +77,6 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ f
             sub="leads ÷ link clicks"
           />
           <Kpi label="CTR" value={pct(d.totals.ctr, 2)} tone={ctrTone(d.totals.ctr, 2)} />
-          <Kpi label="CPM" value={eur(d.totals.cpm)} />
           <Kpi
             label="CAC"
             value={d.sales.cac == null ? eur(0) : eur(d.sales.cac)}
