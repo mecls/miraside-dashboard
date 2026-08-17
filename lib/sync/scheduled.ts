@@ -7,10 +7,14 @@ import { reportError } from "@/lib/alert";
 import { triggerProcess } from "@/lib/launch-batch";
 
 /**
- * The full scheduled refresh, in one place. Shared by all three triggers so they do the SAME work:
- *   - Vercel Cron (GET /api/sync/facebook, every 30 min)  — the reliable native scheduler  [selfHeal]
- *   - n8n Schedule Trigger (POST /api/sync/facebook)      — redundant second scheduler      [selfHeal]
- *   - in-app Refresh button (POST /api/sync/refresh)      — on-demand, user-triggered        [read-only]
+ * The full scheduled refresh, in one place. Shared by all three callers so they do the SAME work:
+ *   - n8n Schedule Trigger      (POST /api/sync/facebook, :00/:30) — external scheduler        [selfHeal]
+ *   - Supabase pg_cron          (POST /api/sync/facebook, :15/:45) — redundant, staggered      [selfHeal]
+ *   - in-app Refresh button     (POST /api/sync/refresh)           — on-demand, user-triggered [read-only]
+ *
+ * NOTE: there is no Vercel Cron. This list previously claimed one ("the reliable native scheduler"), but
+ * the repo has no vercel.json/vercel.ts, so the GET handler it referred to was never reachable and was
+ * deleted 2026-08-17. Both live schedulers are EXTERNAL — that is the actual reliability posture.
  *
  * Two safety rules baked in here so every caller inherits them:
  *

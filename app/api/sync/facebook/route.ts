@@ -25,18 +25,25 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
- * Scheduled Facebook sync endpoint. Two callers, two verbs — same work (runScheduledSync):
- *   - GET  = Vercel Cron (every 30 min; see vercel.json). Vercel adds `Authorization: Bearer $CRON_SECRET`.
- *            This is the RELIABLE native scheduler — it doesn't depend on any external service being up.
- *   - POST = the n8n Schedule Trigger (a redundant second scheduler), with a JSON body for custom windows.
+ * Scheduled Facebook sync endpoint — POST only. Same work for every caller (runScheduledSync).
+ *
+ * TWO redundant external schedulers, both POSTing here every 30 min on a 15-min stagger (either one
+ * dying, the other covers):
+ *   - n8n workflow "Miraside — Facebook Sync (scheduled)" (ym7yCxZIdcVFd3aJ) at :00/:30
+ *   - Supabase pg_cron job `miraside-fb-sync` at :15/:45
+ *
+ * There is NO Vercel Cron. This comment used to describe a `GET` handler as "the RELIABLE native
+ * scheduler ... see vercel.json" — but the repo has no vercel.json or vercel.ts and never did, so
+ * nothing ever called it. The handler and its CRON_SECRET auth were deleted 2026-08-17 rather than left
+ * as dead code that overstates this endpoint's redundancy. If you ever DO want a native cron, add the
+ * config and a GET handler together, and confirm the plan allows sub-daily crons first (Hobby caps them
+ * at once/day and fails the deploy) — `CRON_SECRET` may still be set in the Vercel env and is unused.
  *
  * Auth is secret-based and never coupled to NODE_ENV, so a mis-set env can't silently open a
- * service-role-powered sync endpoint:
- *   - GET  requires `Authorization: Bearer <CRON_SECRET | SYNC_TRIGGER_SECRET>`.
- *   - POST requires a matching `x-sync-token` (SYNC_TRIGGER_SECRET); secret-less access only via the
- *     explicit ALLOW_INSECURE_SYNC=1 dev flag.
+ * service-role-powered sync endpoint: POST requires a matching `x-sync-token` (SYNC_TRIGGER_SECRET);
+ * secret-less access only via the explicit ALLOW_INSECURE_SYNC=1 dev flag, which is gated to non-prod.
  *
- * Body (POST, optional JSON): { "backfillDays": number, "windowDays": number }
+ * Body (optional JSON): { "backfillDays": number, "windowDays": number }
  *   - omitted -> rolling defaults (14d daily / 30d window): fast, idempotent, self-healing.
  */
 const DEFAULT_ROLLING_BACKFILL_DAYS = 14;
@@ -58,16 +65,6 @@ function postAuthorized(req: Request): boolean {
   // ALLOW_INSECURE_SYNC dev flag lingers in a prod env. The escape hatch is dev/preview only.
   if (!expected) return process.env.ALLOW_INSECURE_SYNC === "1" && process.env.VERCEL_ENV !== "production";
   return eq(req.headers.get("x-sync-token") ?? "", expected);
-}
-
-/** GET (Vercel Cron): match the Bearer token against CRON_SECRET, or SYNC_TRIGGER_SECRET as a fallback. */
-function getAuthorized(req: Request): boolean {
-  const auth = req.headers.get("authorization") ?? "";
-  const cron = process.env.CRON_SECRET;
-  const sync = process.env.SYNC_TRIGGER_SECRET;
-  if (cron && eq(auth, `Bearer ${cron}`)) return true;
-  if (sync && eq(auth, `Bearer ${sync}`)) return true;
-  return false;
 }
 
 /** Minutes since the last COMPLETED sync (leads is the run's final phase, so its stamp ≈ full-sync
@@ -115,11 +112,6 @@ async function runAndRespond(backfillDays: number, windowDays?: number) {
     }
     return NextResponse.json({ ok: false, error: safe }, { status: 502 });
   }
-}
-
-export async function GET(req: Request) {
-  if (!getAuthorized(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  return runAndRespond(DEFAULT_ROLLING_BACKFILL_DAYS);
 }
 
 export async function POST(req: Request) {

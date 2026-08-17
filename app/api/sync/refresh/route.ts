@@ -3,7 +3,11 @@ import { createServerSupabase } from "@/lib/supabase/server";
 import { runScheduledSync } from "@/lib/sync/scheduled";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+// Matches /api/sync/facebook (300) on purpose: this button runs the SAME runScheduledSync, so the leads
+// pass costs the same ~64s and swings with GHL's latency (89.5s and 133s were both measured on identical
+// code on 2026-08-17). At 120 a slow click was killed mid-write — the user's problem was never the wait,
+// it was a half-finished sync. Normal runs still return in about a minute; this is only the ceiling.
+export const maxDuration = 300;
 
 /**
  * In-app manual refresh — the sidebar "Refresh data" button. Any signed-in user may fire it because it's a

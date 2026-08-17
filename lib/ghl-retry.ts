@@ -10,6 +10,19 @@
  * failure means the request almost certainly never reached GHL's app, so a retry can't double-write.
  */
 
+/**
+ * Hard ceiling on any single GoHighLevel request, shared by the read client (lib/ghl.ts) and the write
+ * client (lib/ghl-write.ts) so the two can never drift. Without a bound, ONE hung upstream connection
+ * holds the whole serverless function open until the platform kills it — which is how a healthy 64s sync
+ * turned into a `timeout of 120000ms exceeded` alert with no useful error.
+ *
+ * A trip throws a DOMException named "TimeoutError", which isTransientGhlError classes as transient, so
+ * the call retries. Worst case for one request is therefore tries × this + the backoff below (~65s at the
+ * default 4 tries) — acceptable because a failed READ just keeps the stored value for a cycle, and the
+ * per-lead try/catch confines it to a single lead.
+ */
+export const GHL_TIMEOUT_MS = 15_000;
+
 // Transient upstream/gateway statuses (parsed from our thrown "GHL <path> <status>: …" messages).
 // 520-524 are Cloudflare's OWN edge errors (GHL sits behind Cloudflare), not GHL app responses: 522
 // "Connection timed out" paged the Automation Errors channel on 2026-08-16 for a blip that self-healed

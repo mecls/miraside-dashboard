@@ -4,7 +4,7 @@
  * push (lib/ghl-push.ts) and the website-audit endpoint. Needs GHL_API_KEY + GHL_LOCATION_ID
  * (+ GHL_ADS_FOLDER_ID for where new fields land).
  */
-import { withGhlRetry } from "./ghl-retry";
+import { withGhlRetry, GHL_TIMEOUT_MS } from "./ghl-retry";
 import { fieldFingerprint } from "./fingerprint";
 import { companyDomainFromEmail } from "./email-domain";
 import { createAdminClient } from "./supabase/admin";
@@ -70,7 +70,8 @@ async function ghlFetch(path: string, init: RequestInit & { method: string }, re
       ...init,
       // Bound every GHL write so a hung upstream throws (classed transient → retried for idempotent calls)
       // instead of holding the whole serverless function open to its platform limit. Honour a caller signal.
-      signal: init.signal ?? AbortSignal.timeout(15_000),
+      // Shared with the read client via GHL_TIMEOUT_MS so the two can never drift apart.
+      signal: init.signal ?? AbortSignal.timeout(GHL_TIMEOUT_MS),
       headers: { Authorization: `Bearer ${c.key}`, Version: GHL_VERSION, "Content-Type": "application/json", Accept: "application/json" },
     });
     const text = await res.text();
