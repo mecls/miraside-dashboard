@@ -6,8 +6,23 @@ import { isTransientGhlError } from "@/lib/ghl-retry";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
-// Rolling-window FB sync + the lightweight leads pull. Headroom for the Meta + GHL calls.
-export const maxDuration = 120;
+/**
+ * Rolling-window FB sync + the leads pull.
+ *
+ * Why 300 and not 120: the leads pass makes ~2.5 SERIAL GoHighLevel calls per linked lead (a task read
+ * and a notes read are ungated, plus appointment/opportunity reads for leads with meetings) — at 141
+ * linked leads that is ~360 round-trips. GHL caps us at 100 requests / 10s per location, so there is a
+ * hard ~36s floor that grows linearly with the lead count. 120 sat right on top of that: a slow cycle was
+ * killed by the platform mid-write, which ALSO meant the transient-suppression below never got to run and
+ * n8n reported a bare "timeout of 120000ms exceeded" instead. 300 is the platform default and is already
+ * proven on this account (app/api/launches/{create,process}).
+ *
+ * This is headroom, not the fix — the durable fix is making FEWER GHL calls (staggered notes/task
+ * refresh + a shared token-bucket limiter), since at a fixed 10 req/s the cost is call COUNT, not
+ * concurrency. Until that lands, keep the n8n client timeout ABOVE this number or the client gives up
+ * before the route can answer.
+ */
+export const maxDuration = 300;
 
 /**
  * Scheduled Facebook sync endpoint. Two callers, two verbs — same work (runScheduledSync):

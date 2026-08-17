@@ -18,7 +18,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://miraside-dashboard.vercel.app/api/sync/facebook",
+        "url": "https://dashboard.miraside.co/api/sync/facebook",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -29,7 +29,7 @@
         "specifyBody": "json",
         "jsonBody": "{\n  \"backfillDays\": 14,\n  \"windowDays\": 30\n}",
         "options": {
-          "timeout": 120000
+          "timeout": 320000
         }
       },
       "id": "b2222222-2222-4222-8222-222222222222",
