@@ -37,7 +37,11 @@ export const maxDuration = 300;
  * nothing ever called it. The handler and its CRON_SECRET auth were deleted 2026-08-17 rather than left
  * as dead code that overstates this endpoint's redundancy. If you ever DO want a native cron, add the
  * config and a GET handler together, and confirm the plan allows sub-daily crons first (Hobby caps them
- * at once/day and fails the deploy) — `CRON_SECRET` may still be set in the Vercel env and is unused.
+ * at once/day and fails the deploy).
+ *
+ * DO NOT DELETE `CRON_SECRET` from the Vercel env. It is no longer read HERE, but it is still the auth
+ * for app/api/cold-calls/sync — removing it breaks that route (caught 2026-08-17 while about to do
+ * exactly that).
  *
  * Auth is secret-based and never coupled to NODE_ENV, so a mis-set env can't silently open a
  * service-role-powered sync endpoint: POST requires a matching `x-sync-token` (SYNC_TRIGGER_SECRET);
