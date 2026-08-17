@@ -3,10 +3,29 @@
  * status. We pull the location's contacts once per sync, index them by phone, and read their tags.
  * GHL is NOT our source for "which ad" (it doesn't reliably store that) — Meta is. See lib/sync/leads.ts.
  */
-import { withGhlRetry } from "./ghl-retry";
+import { withGhlRetry, GHL_TIMEOUT_MS } from "./ghl-retry";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
+
+/**
+ * EVERY GoHighLevel request in this file goes through here — never bare `fetch`.
+ *
+ * These reads were previously unbounded while the write client (lib/ghl-write.ts) had always been capped,
+ * so a single hung connection could hold the serverless function open to its platform limit. That is the
+ * failure the `timeout of ...ms exceeded` Slack alerts were reporting: the function got killed before the
+ * route could answer, so its own transient-suppression never ran.
+ *
+ * A trip throws DOMException("TimeoutError"), which isTransientGhlError treats as transient — so calls
+ * wrapped in withGhlRetry (all of them here) retry it, and a genuinely dead endpoint surfaces as a normal
+ * error the caller already knows how to handle by keeping its stored value.
+ *
+ * The wrapper exists rather than nine inline `signal:` properties so a new read cannot silently be added
+ * unbounded: there is one place to get this right.
+ */
+function ghlRead(url: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(GHL_TIMEOUT_MS) });
+}
 
 /**
  * Tags (lower-cased) that mark a lead's QUALIFICATION — the pre-meet filter: did this ad lead make it
@@ -96,7 +115,7 @@ export async function deleteGhlContact(contactId: string | null | undefined): Pr
   const cfg = ghlCfg();
   if (!cfg || !contactId) return { ok: false, status: 0 };
   return withGhlRetry(async () => {
-    const res = await fetch(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}`, {
+    const res = await ghlRead(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${cfg.key}`, Version: GHL_VERSION, Accept: "application/json" },
     });
@@ -156,7 +175,7 @@ export async function fetchAllGhlContacts(): Promise<GhlContact[]> {
   const MAX_PAGES = 200; // safety: caps at 20k contacts
   for (let page = 1; page <= MAX_PAGES; page++) {
     const json: any = await withGhlRetry(async () => {
-      const res = await fetch(`${GHL_BASE}/contacts/search`, {
+      const res = await ghlRead(`${GHL_BASE}/contacts/search`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${cfg.key}`,
@@ -215,7 +234,7 @@ export async function fetchAppointmentById(appointmentId: string): Promise<GhlAp
   if (!cfg) return null;
   const headers = { Authorization: `Bearer ${cfg.key}`, Version: GHL_VERSION, Accept: "application/json" };
   const detail: any = await withGhlRetry(async () => {
-    const res = await fetch(`${GHL_BASE}/calendars/events/appointments/${encodeURIComponent(appointmentId)}`, { headers });
+    const res = await ghlRead(`${GHL_BASE}/calendars/events/appointments/${encodeURIComponent(appointmentId)}`, { headers });
     // 404 is this endpoint's ONLY true "gone" (live-probed: invalid/unknown ids all answer 404
     // "Please provide a valid calendar event ID"). A 400 here is a malformed request or one of GHL's
     // mislabeled internal failures — those must THROW so callers keep stale data instead of clearing
@@ -263,7 +282,7 @@ export async function fetchAppointmentsByContact(): Promise<Map<string, SweepEve
   if (!cfg) return out;
   const headers = { Authorization: `Bearer ${cfg.key}`, Version: GHL_VERSION, Accept: "application/json" };
   const cals: any = await withGhlRetry(async () => {
-    const res = await fetch(`${GHL_BASE}/calendars/?locationId=${encodeURIComponent(cfg.location)}`, { headers });
+    const res = await ghlRead(`${GHL_BASE}/calendars/?locationId=${encodeURIComponent(cfg.location)}`, { headers });
     if (!res.ok) throw new Error(`GHL calendars/list ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
     return res.json();
   });
@@ -275,7 +294,7 @@ export async function fetchAppointmentsByContact(): Promise<Map<string, SweepEve
     if (!cal?.id) continue;
     try {
       const j: any = await withGhlRetry(async () => {
-        const res = await fetch(
+        const res = await ghlRead(
           `${GHL_BASE}/calendars/events?locationId=${encodeURIComponent(cfg.location)}&calendarId=${encodeURIComponent(String(cal.id))}&startTime=${startMs}&endTime=${endMs}`,
           { headers }
         );
@@ -353,7 +372,7 @@ export async function fetchContactAppointment(contactId: string, knownId?: strin
   if (!cfg) return null;
   const headers = { Authorization: `Bearer ${cfg.key}`, Version: GHL_VERSION, Accept: "application/json" };
   const list: any = await withGhlRetry(async () => {
-    const res = await fetch(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}/appointments`, { headers });
+    const res = await ghlRead(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}/appointments`, { headers });
     if (!res.ok) throw new Error(`GHL contact/appointments ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
     return res.json();
   });
@@ -390,7 +409,7 @@ export async function fetchContactOpenTask(contactId: string): Promise<GhlTask |
   const cfg = ghlCfg();
   if (!cfg) return null;
   const json: any = await withGhlRetry(async () => {
-    const res = await fetch(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}/tasks`, {
+    const res = await ghlRead(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}/tasks`, {
       headers: { Authorization: `Bearer ${cfg.key}`, Version: GHL_VERSION, Accept: "application/json" },
     });
     if (!res.ok) throw new Error(`GHL contact/tasks ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
@@ -409,7 +428,7 @@ export async function listOpenContactTasks(contactId: string): Promise<{ id: str
   const cfg = ghlCfg();
   if (!cfg) return [];
   const json: any = await withGhlRetry(async () => {
-    const res = await fetch(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}/tasks`, {
+    const res = await ghlRead(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}/tasks`, {
       headers: { Authorization: `Bearer ${cfg.key}`, Version: GHL_VERSION, Accept: "application/json" },
     });
     if (!res.ok) throw new Error(`GHL contact/tasks ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
@@ -432,7 +451,7 @@ export async function fetchContactNotes(contactId: string): Promise<GhlNote[]> {
   const cfg = ghlCfg();
   if (!cfg) return [];
   const json: any = await withGhlRetry(async () => {
-    const res = await fetch(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}/notes`, {
+    const res = await ghlRead(`${GHL_BASE}/contacts/${encodeURIComponent(contactId)}/notes`, {
       headers: { Authorization: `Bearer ${cfg.key}`, Version: GHL_VERSION, Accept: "application/json" },
     });
     if (!res.ok) throw new Error(`GHL contact/notes ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
