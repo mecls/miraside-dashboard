@@ -11,7 +11,16 @@
  */
 
 // Transient upstream/gateway statuses (parsed from our thrown "GHL <path> <status>: …" messages).
-const TRANSIENT_STATUS = new Set([429, 502, 503, 504]);
+// 520-524 are Cloudflare's OWN edge errors (GHL sits behind Cloudflare), not GHL app responses: 522
+// "Connection timed out" paged the Automation Errors channel on 2026-08-16 for a blip that self-healed
+// on the next cycle. They belong with the other gateway statuses. Note the body text ("Connection timed
+// out") matches none of the regex fallbacks below, so without the numeric entry a 522 fails hard.
+//
+// Safe to retry: the only NON-idempotent GHL calls we make (task create, note create) never reach
+// withGhlRetry at all — ghlFetch passes retry=false for them precisely so a landed-but-timed-out request
+// can't double-create. Everything that DOES retry is an upsert (GHL dedupes on phone/email), a scoped
+// tag add/remove, a PUT, or a DELETE that treats "already gone" as success.
+const TRANSIENT_STATUS = new Set([429, 502, 503, 504, 520, 521, 522, 523, 524]);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
