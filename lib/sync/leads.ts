@@ -172,7 +172,52 @@ export async function releaseLeadPushClaim(admin: SupabaseClient, tenantId: stri
   }
 }
 
+/**
+ * Staggered notes refresh (2026-08-17). The per-contact notes read was one GHL call for EVERY linked
+ * contact on EVERY cycle — 141 of the sync's ~363 calls, ~39% of its whole GHL budget, against GHL's
+ * documented 100-requests/10s-per-location cap (a hard ~10 req/s ceiling that made the sync 89.5s of its
+ * 120s limit and was the timeout cause).
+ *
+ * It is safe to stagger because it is the LEAST load-bearing read we make. leads.notes_count/notes_cache
+ * only drive the row's "has notes" chip and the popup's instant-open seed:
+ *   - opening a lead re-reads notes live (app/api/leads/[id]/notes),
+ *   - every dashboard-side add/delete reconciles the count itself,
+ * so this read exists solely to light the chip for a note written directly INSIDE GoHighLevel that
+ * nobody has opened here yet. Bounded staleness there is invisible in practice.
+ *
+ * Tasks are deliberately NOT staggered: they drive the work queues (Tasks worklist, follow-up nudges,
+ * rebook queue), where a stale value means calling someone you shouldn't or a done task lingering.
+ *
+ * The slice is keyed on the contact id, NOT random: it is stable within a cycle, spreads contacts evenly,
+ * and guarantees every contact comes due exactly once every NOTES_REFRESH_EVERY cycles — nothing starves.
+ */
+const NOTES_REFRESH_EVERY = 4; // cycles; schedulers fire every ~15 min → each contact refreshes ~hourly
+const CYCLE_MS = 15 * 60_000;
+function contactNotesDue(contactId: string): boolean {
+  let h = 0;
+  for (let i = 0; i < contactId.length; i++) h = (h * 31 + contactId.charCodeAt(i)) | 0;
+  return Math.abs(h) % NOTES_REFRESH_EVERY === Math.floor(Date.now() / CYCLE_MS) % NOTES_REFRESH_EVERY;
+}
+
+/**
+ * Backstop for the per-lead loop — the sync's dominant cost, and the one that grows with the lead count.
+ * The route allows 300s; stop STARTING new per-lead work at 200s so the phases after it (company
+ * extraction, the audit/GHL durable retries, and the sync_state completion stamp) still run and the
+ * function returns a real answer instead of being killed mid-write by the platform.
+ *
+ * A skipped lead just keeps its stored mirror for one cycle — the same outcome as any read failure here
+ * — and is picked up next run.
+ *
+ * CAVEAT: leads are processed in stable id order, so a deadline hit always skips the SAME tail. That is
+ * only acceptable while this is a true backstop (measured 2026-08-17: the loop finishes in well under
+ * this). If it starts firing regularly, reduce the CALL COUNT — do not "fix" it by rotating the loop
+ * order, which would change which lead wins the shared-contact opportunity cache (see the `fromCache`
+ * guard below) and could cross-link two leads onto one deal.
+ */
+const LOOP_DEADLINE_MS = 200_000;
+
 export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Promise<LeadsSyncSummary> {
+  const syncStartedAt = Date.now();
   // 0) Permanently-removed leads (operator deleted them). Meta still serves them from the form, so we must
   //    filter them out here or they'd be re-imported every cycle, and purge any row that slipped back in.
   const { data: exRows } = await admin.from("lead_exclusions").select("meta_lead_id").eq("tenant_id", tenantId);
@@ -600,7 +645,15 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
     const taskByContact = new Map<string, GhlTask | null>();
     const notesByContact = new Map<string, { id: string; body: string; createdAt: string | null }[]>();
     const oppByContact = new Map<string, GhlOpportunity | null>();
+    let loopSkipped = 0; // leads left for the next cycle because the deadline hit (see LOOP_DEADLINE_MS)
+    let notesRead = 0; // GHL notes calls actually spent this cycle (the rest were staggered out)
     for (const row of linked) {
+      // Out of budget: leave the remaining leads' mirrors exactly as they are and let the following
+      // phases + the sync_state stamp run. Never a partial write — the whole iteration is skipped.
+      if (Date.now() - syncStartedAt > LOOP_DEADLINE_MS) {
+        loopSkipped++;
+        continue;
+      }
       try {
         let appt: GhlAppointment | null;
         if (apptByContact.has(row.ghl_contact_id)) {
@@ -812,33 +865,46 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
         // Note-chip mirror: leads.notes_count exists ONLY so a row can show "this lead has notes"
         // without opening it. The notes route reconciles it whenever notes are read/added/deleted in the
         // dashboard, but a note written directly inside GHL touches nothing here — the chip would stay
-        // dark until someone happened to open that contact. Counting notes each sync makes the chip
-        // authoritative within one cycle (~30 min). One extra GHL read per unique linked contact, in its
-        // OWN try so a notes outage can't gate the appointment/task mirrors above.
+        // dark until someone happened to open that contact. STAGGERED as of 2026-08-17: this was one GHL
+        // call per linked contact per cycle (~39% of the sync's entire GHL budget) — see
+        // NOTES_REFRESH_EVERY for why this specific read is the safe one to slow down. In its OWN try so
+        // a notes outage can't gate the appointment/task mirrors above.
         try {
-          let contactNotes: { id: string; body: string; createdAt: string | null }[];
-          if (notesByContact.has(row.ghl_contact_id)) {
-            contactNotes = notesByContact.get(row.ghl_contact_id)!;
-          } else {
-            contactNotes = (await fetchContactNotes(row.ghl_contact_id)) as { id: string; body: string; createdAt: string | null }[];
-            notesByContact.set(row.ghl_contact_id, contactNotes);
-          }
-          const notesCount = contactNotes.length;
-          // Compare-and-swap, NOT part of `patch`: this loop runs for minutes, so an operator adding or
-          // deleting a note mid-sync would already have moved the stored count past our reading — writing
-          // ours would clobber it (worst case blanking a just-added note's chip for a cycle). The
-          // `.eq(notes_count, snapshot)` makes the write a no-op whenever anyone else touched it since.
-          // notes_cache (the popup's instant-open seed) rides the same guarded write; a note EDITED in
-          // GHL with an unchanged count stays stale here until the next popup open reconciles it.
-          // `row.notes_cache == null` also triggers the write: a contact whose count never changes would
-          // otherwise NEVER get its cache filled and its popup would load slow forever (Miguel, 23 Jul).
-          if (notesCount !== (row.notes_count ?? 0) || row.notes_cache == null) {
-            const q = admin
-              .from("leads")
-              .update({ notes_count: notesCount, notes_cache: contactNotes.map((n) => ({ id: n.id, body: n.body, createdAt: n.createdAt ?? null })) })
-              .eq("id", row.id);
-            // `.eq(col, null)` never matches in SQL — a row predating the column needs an IS NULL guard.
-            await (row.notes_count === null ? q.is("notes_count", null) : q.eq("notes_count", row.notes_count));
+          const cachedNotes = notesByContact.get(row.ghl_contact_id);
+          // Spend the call only when this contact is in THIS cycle's slice (see contactNotesDue). Two
+          // exemptions, both mandatory:
+          //   - `cachedNotes !== undefined`: a second lead on the same contact reuses the already-fetched
+          //     list (free — no call), so it must still write its own row's mirror.
+          //   - `row.notes_cache == null`: a row that has never cached notes MUST seed now, or its popup
+          //     loads slow forever and its chip never lights (mirrors the write-trigger below).
+          // Otherwise skip, keeping the stored count/cache — identical to what the catch below already
+          // does on a read failure, which is the behaviour this path has always had.
+          if (cachedNotes !== undefined || row.notes_cache == null || contactNotesDue(row.ghl_contact_id)) {
+            let contactNotes: { id: string; body: string; createdAt: string | null }[];
+            if (cachedNotes !== undefined) {
+              contactNotes = cachedNotes;
+            } else {
+              contactNotes = (await fetchContactNotes(row.ghl_contact_id)) as { id: string; body: string; createdAt: string | null }[];
+              notesByContact.set(row.ghl_contact_id, contactNotes);
+              notesRead++;
+            }
+            const notesCount = contactNotes.length;
+            // Compare-and-swap, NOT part of `patch`: this loop runs for minutes, so an operator adding or
+            // deleting a note mid-sync would already have moved the stored count past our reading — writing
+            // ours would clobber it (worst case blanking a just-added note's chip for a cycle). The
+            // `.eq(notes_count, snapshot)` makes the write a no-op whenever anyone else touched it since.
+            // notes_cache (the popup's instant-open seed) rides the same guarded write; a note EDITED in
+            // GHL with an unchanged count stays stale here until the next popup open reconciles it.
+            // `row.notes_cache == null` also triggers the write: a contact whose count never changes would
+            // otherwise NEVER get its cache filled and its popup would load slow forever (Miguel, 23 Jul).
+            if (notesCount !== (row.notes_count ?? 0) || row.notes_cache == null) {
+              const q = admin
+                .from("leads")
+                .update({ notes_count: notesCount, notes_cache: contactNotes.map((n) => ({ id: n.id, body: n.body, createdAt: n.createdAt ?? null })) })
+                .eq("id", row.id);
+              // `.eq(col, null)` never matches in SQL — a row predating the column needs an IS NULL guard.
+              await (row.notes_count === null ? q.is("notes_count", null) : q.eq("notes_count", row.notes_count));
+            }
           }
         } catch {
           /* notes read failed — keep the row's stored count; the next sync retries */
@@ -941,6 +1007,14 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
         /* appointment read failed — keep whatever was stored for this lead */
       }
     }
+    // One line per cycle so the staggering + deadline are observable in production (there are no tests
+    // here and this is the sync's dominant cost). `notes` should sit near linked/NOTES_REFRESH_EVERY;
+    // `deadlineSkipped` must stay 0 — anything else means the loop is outgrowing its budget.
+    console.log(
+      `leads loop: linked=${linked.length} notesRead=${notesRead} deadlineSkipped=${loopSkipped} elapsed=${Math.round(
+        (Date.now() - syncStartedAt) / 1000
+      )}s`
+    );
   }
 
   // COMPANY NAMES from websites: for leads with a known site (operator-set website override, else the
