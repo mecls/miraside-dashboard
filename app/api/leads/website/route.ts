@@ -58,6 +58,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const digits = (p?: string | null) => (p ?? "").replace(/\D/g, "");
 const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n) : s);
 
+// The ROI audit page asks for the website as an ordinary form question (EN "What's your website?",
+// PT "Qual é o teu website?"), so it arrives inside answers[] like any other. We special-case it so
+// its value feeds the native GHL `website` field instead of minting a throwaway custom field.
+const isWebsiteQuestion = (label: string) => /website/i.test(label);
+function normalizeSite(v: string): string | null {
+  const s = v.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  if (!s || s.length > 200 || /\s/.test(s) || !s.includes(".")) return null;
+  return s;
+}
+
 // One stored answer. The union-merge that preserves partial submissions is done atomically in the DB
 // (merge_website_lead_answers RPC) so concurrent per-step fires can't lost-update each other.
 type StoredAnswer = { key: string; label: string; value: string };
@@ -244,18 +254,30 @@ export async function POST(req: Request) {
       }
     }
 
+    // Promote the website ANSWER to the lead's canonical website: persist it as website_override (only
+    // when an operator hasn't set one — .is null guard) so it shows in the dashboard and feeds company-name
+    // extraction, and route its value to the native GHL `website` field in the push below.
+    const siteAnswer = effectiveAnswers.find((a) => isWebsiteQuestion(a.label));
+    const typedSite = siteAnswer ? normalizeSite(siteAnswer.value) : null;
+    if (typedSite) {
+      await matchKey(admin.from("leads").update({ website_override: typedSite })).is("website_override", null);
+    }
+
     // --- GHL (best-effort): push the FULL current answer set so the contact fills in as the lead progresses.
     //     A GHL failure must never lose the lead (already persisted) nor 500 the request. ---
     let ghlContactId: string | null = null;
     try {
       const answerFields: Array<{ id: string; value: string }> = [];
-      for (const sa of effectiveAnswers) answerFields.push({ id: await ensureField(sa.label), value: sa.value });
+      for (const sa of effectiveAnswers) {
+        if (isWebsiteQuestion(sa.label)) continue; // routed to the native `website` field above, not a custom field
+        answerFields.push({ id: await ensureField(sa.label), value: sa.value });
+      }
       const tag = isCompleted ? "audit-completed" : "audit-started";
       ghlContactId = await writeContactWithSource({
         name: pushName,
         phone: pushPhone,
         email: pushEmail,
-        website: pushWebsite,
+        website: pushWebsite ?? typedSite ?? undefined,
         label,
         channel: attrChannel,
         setConversion: isCompleted, // Conversion Source only on the conversion
