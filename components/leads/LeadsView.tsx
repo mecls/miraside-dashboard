@@ -21,6 +21,12 @@ import {
   awaitingOutcome,
   rescheduleUrl,
   followUpBookingUrl,
+  bookingUrl,
+  bookingCalendar,
+  suggestedCalendarId,
+  BOOKING_CALENDARS,
+  type BookingCalendar,
+  type BookingContact,
   type LeadMeeting,
 } from "@/lib/meetings";
 import { DayPicker } from "react-day-picker";
@@ -801,17 +807,246 @@ function OpportunitySection({ lead, onPatched }: { lead: LeadView; onPatched: (p
 /** The attendance + outcome + disqualify buttons for ONE meeting. Presentational — `onSave(patch)` does
  *  the persist. Shared by the expanded-row history (MeetingsSection) and the Meeting-column pill popover
  *  so the two surfaces can never drift. */
-/** Prefilled follow-up booking link for one lead: operator-corrected name split when present, else the
- *  effective full name split on its first space; effective (override-aware) email + phone. */
-function followUpUrlFor(lead: LeadView): string {
+/** Operator-corrected name split when present, else the effective full name split on its first space. */
+function splitName(lead: LeadView): { firstName: string | null; lastName: string | null } {
   const full = (lead.fullName ?? "").trim();
   const parts = full ? full.split(/\s+/) : [];
-  return followUpBookingUrl({
+  return {
     firstName: lead.firstNameOverride ?? (parts[0] || null),
     lastName: lead.lastNameOverride ?? (parts.slice(1).join(" ") || null),
-    email: lead.email,
-    phone: lead.phone,
-  });
+  };
+}
+
+/** Prefilled follow-up booking link for one lead: override-aware name split, effective email + phone. */
+function followUpUrlFor(lead: LeadView): string {
+  return followUpBookingUrl({ ...splitName(lead), email: lead.email, phone: lead.phone });
+}
+
+/** Everything the booking form can take off the operator's hands. `website` is the effective one
+ *  (operator override → inferred from a professional email domain), which the discovery form asks for. */
+function bookingContactFor(lead: LeadView): BookingContact {
+  return { ...splitName(lead), email: lead.email, phone: lead.phone, website: lead.website };
+}
+
+/** How long we watch GoHighLevel for the booking the operator just went off to make, and how often. */
+const BOOK_POLL_MS = 5_000;
+const BOOK_WATCH_MS = 120_000;
+
+function CopyIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+/**
+ * "Book call" — pick the meeting type, and the lead's details are already in the form.
+ *
+ * Booking happens in GoHighLevel's own widget, on purpose. Every downstream automation in the CRM (the
+ * opportunity, its "Booked Call - Discovery/Follow-up" stage, the confirmation messages, the no-show
+ * flows) hangs off a real widget booking, and creating the appointment over the API instead is not
+ * proven to fire any of it — a booking that silently skips the pipeline is worse than one extra tab.
+ *
+ * What we DO own is the wait: normally the dashboard wouldn't learn about the booking for up to 30
+ * minutes. So the moment a calendar is picked we start watching that one calendar for this contact,
+ * and the row updates itself as soon as the booking lands (see POST /api/leads/[id]/meetings). Closing
+ * the widget without booking simply finds nothing, and the watch expires quietly.
+ */
+function BookCallMenu({
+  lead,
+  onSaved,
+  variant,
+}: {
+  lead: LeadView;
+  onSaved: (note: string | null, patch?: Partial<LeadView>) => void;
+  /** `cell` = the quiet affordance in the Meeting column; `panel` = the labelled button in the expanded row. */
+  variant: "cell" | "panel";
+}) {
+  const [open, setOpen] = useState(false);
+  const [watching, setWatching] = useState<string | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const stopRef = useRef<(() => void) | null>(null);
+
+  // A watch outlives the menu but never the row: leaving the tab/filtering the lead away must not keep
+  // polling GoHighLevel forever.
+  useEffect(() => () => stopRef.current?.(), []);
+
+  const suggested = suggestedCalendarId(lead);
+  const contact = bookingContactFor(lead);
+
+  function watchFor(calendarId: string) {
+    stopRef.current?.(); // a second pick replaces the first watch rather than racing it
+    setWatching(calendarId);
+    const deadline = Date.now() + BOOK_WATCH_MS;
+    let done = false;
+    let inFlight = false;
+    let timer = 0;
+    const onFocus = () => void check();
+    const finish = () => {
+      done = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      stopRef.current = null;
+      setWatching(null);
+    };
+    // What was already on that calendar for this contact when the watch began. Until we have it we
+    // cannot tell a booking just made from one that was always there, so the loop establishes the
+    // baseline first and only then starts looking — a transient failure delays detection by a tick
+    // instead of announcing the wrong call.
+    let baseline: string[] | null = null;
+
+    async function check() {
+      if (done || inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch(`/api/leads/${lead.id}/meetings`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            baseline === null ? { calendarId, baseline: true } : { calendarId, knownAppointmentIds: baseline }
+          ),
+        });
+        const d = await res.json();
+        if (done) return;
+        if (!res.ok) {
+          // 400/409 mean this watch can never succeed (unknown calendar, no linked CRM contact) — say so
+          // once and stop, rather than spinning for two minutes on a request that will keep failing.
+          // A 5xx is a blip: keep waiting.
+          if (res.status === 400 || res.status === 409) {
+            finish();
+            toast(typeof d?.error === "string" ? d.error : "Couldn't watch for that booking.", "error");
+          }
+          return;
+        }
+        if (baseline === null) {
+          if (Array.isArray(d.appointmentIds)) baseline = d.appointmentIds as string[];
+          return;
+        }
+        if (d.meeting) {
+          const m = d.meeting as LeadMeeting;
+          finish();
+          toast(`${bookingCalendar(calendarId)?.name ?? "Call"} booked — ${fmtApptRange(m.startsAt, m.endsAt)}`, "success");
+          // needsRebook, awaitingOutcome, meetingCount and the queue bucket are all derived server-side,
+          // so a local patch can't express this — the row has to come back from the server.
+          onSaved(null);
+        }
+      } catch {
+        // A blip mid-watch is not a failed booking. Keep waiting; the deadline ends it.
+      } finally {
+        inFlight = false;
+        if (!done && Date.now() > deadline) finish();
+      }
+    }
+
+    // Wire the timer, the focus listener and the cancel handle BEFORE the first check: `check` can call
+    // `finish` on its very first pass, and finish must always have real things to tear down. Kicking off
+    // first would leave an interval nobody clears.
+    //
+    // Coming back from the widget tab is the strongest possible hint that they just booked — check then,
+    // instead of making them stare at a spinner until the next tick.
+    timer = window.setInterval(() => void check(), BOOK_POLL_MS);
+    window.addEventListener("focus", onFocus);
+    stopRef.current = finish;
+    // The baseline is wanted now, not one tick from now: the operator is already filling in the form.
+    void check();
+  }
+
+  function pick(c: BookingCalendar) {
+    // Opened synchronously inside the click, or the pop-up blocker eats it.
+    window.open(bookingUrl(c.id, contact), "_blank", "noopener,noreferrer");
+    setOpen(false);
+    watchFor(c.id);
+  }
+
+  async function copyLink(c: BookingCalendar) {
+    setOpen(false);
+    try {
+      await navigator.clipboard.writeText(bookingUrl(c.id, contact));
+      toast(`${c.name} link copied — their details are already filled in.`, "success");
+    } catch {
+      toast("Couldn't copy the link.", "error");
+    }
+  }
+
+  const row = (c: BookingCalendar) => (
+    <div key={c.id} className="flex items-center gap-1">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); pick(c); }}
+        className="flex min-w-0 flex-1 flex-col gap-0.5 rounded px-2 py-1.5 text-left transition-colors hover:bg-neutral-800"
+      >
+        <span className="flex items-center gap-1.5 text-xs text-neutral-100">
+          <span className="truncate">{c.name}</span>
+          {c.id === suggested && (
+            <span className="shrink-0 rounded border border-sky-500/40 bg-sky-500/10 px-1 text-[10px] text-sky-300">suggested</span>
+          )}
+        </span>
+        <span className="truncate text-[11px] text-neutral-500">{c.hint} · {c.minutes} min</span>
+      </button>
+      {/* The other way to book: send them the same pre-filled link instead of booking it live. */}
+      <button
+        type="button"
+        title={`Copy the ${c.name} link with this lead's details pre-filled`}
+        aria-label={`Copy the ${c.name} booking link`}
+        onClick={(e) => { e.stopPropagation(); void copyLink(c); }}
+        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-neutral-700 bg-surface-200 text-neutral-500 transition-colors hover:text-neutral-100"
+      >
+        <CopyIcon className="h-3 w-3" />
+      </button>
+    </div>
+  );
+
+  if (watching) {
+    return (
+      <button
+        type="button"
+        title="Waiting for the booking to appear in GoHighLevel — click to stop waiting"
+        onClick={(e) => { e.stopPropagation(); stopRef.current?.(); }}
+        className="inline-flex h-6 items-center gap-1.5 rounded-md border border-sky-500/40 bg-sky-500/10 px-2 text-xs font-medium text-sky-300 transition-colors hover:bg-sky-500/20"
+      >
+        <span className="h-3 w-3 animate-spin rounded-full border border-sky-500/40 border-t-sky-300" />
+        Waiting…
+      </button>
+    );
+  }
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        title="Book a call with this lead — their details go into the form automatically"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        className={
+          variant === "cell"
+            ? // Deliberately greyscale: the Meeting column is greyscale by design, so this sits where the
+              // em-dash was and only comes forward on hover.
+              "inline-flex h-6 items-center gap-1.5 rounded-md border border-neutral-800 px-2 text-xs text-neutral-600 transition-colors hover:border-neutral-700 hover:text-neutral-300"
+            : "inline-flex h-7 items-center gap-1.5 rounded-md border border-neutral-700 bg-surface-200 px-2.5 text-xs font-medium text-neutral-300 transition-colors hover:border-neutral-600 hover:text-neutral-100"
+        }
+      >
+        <CalendarIcon className="h-3 w-3 shrink-0" />
+        {variant === "cell" ? "Book" : "Book call"}
+      </button>
+      {open && btnRef.current && (
+        <FloatingPrompt anchor={btnRef.current} onClose={() => setOpen(false)} excludeAnchor bodyClassName="p-1 w-[290px]">
+          <div className="flex w-full flex-col">
+            {BOOKING_CALENDARS.filter((c) => c.common).map(row)}
+            <div className="my-1 flex items-center gap-2 px-2">
+              <span className="h-px flex-1 bg-neutral-800" />
+              <span className="text-[10px] uppercase tracking-wider text-neutral-600">less used</span>
+              <span className="h-px flex-1 bg-neutral-800" />
+            </div>
+            {BOOKING_CALENDARS.filter((c) => !c.common).map(row)}
+          </div>
+        </FloatingPrompt>
+      )}
+    </>
+  );
 }
 
 function MeetingControls({
@@ -3682,6 +3917,10 @@ const FragmentRow = memo(function FragmentRow({
             ) : (
               <ApptChip at={lead.appointmentAt} status={lead.appointmentStatus} title={lead.appointmentTitle} attendance={lead.apptAttendance ?? lead.latestAttendance} needsConfirm={leadNeedsConfirmation(lead)} needsRebook={lead.needsRebook} />
             )
+          ) : ghlConfigured && lead.matched ? (
+            // Nothing booked — so this cell was a dead em-dash. It's now the shortest path from
+            // "they said yes" to a booked call. Nothing that was here before has moved.
+            <BookCallMenu lead={lead} onSaved={onSaved} variant="cell" />
           ) : (
             <span className="text-neutral-700">—</span>
           )}
@@ -4060,6 +4299,21 @@ const FragmentRow = memo(function FragmentRow({
                 </div>
               )}
             </div>
+            {/* Book a call. Lives in the expanded panel as well as the Meeting cell because the table
+                collapses to the Lead column on a phone — this is the only booking surface there, and
+                it's the one that stays reachable once a call is already on the books. */}
+            {ghlConfigured && lead.matched && (
+              <div className="mt-4 border-t border-neutral-800 pt-3">
+                <p className="mono-label">Book a call</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <BookCallMenu lead={lead} onSaved={onSaved} variant="panel" />
+                  <span className="text-xs text-neutral-500">
+                    Opens the GoHighLevel calendar with their name, email{lead.phone ? ", phone" : ""}
+                    {lead.website ? " and website" : ""} already filled in.
+                  </span>
+                </div>
+              </div>
+            )}
             {ghlConfigured && lead.matched && <MeetingsSection leadId={lead.id} lead={lead} onSaved={onSaved} />}
             {/* Deal value — only leads that actually booked a call carry an opportunity (the GHL
                 workflow creates it at booking; sync links it). */}

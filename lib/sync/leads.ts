@@ -757,6 +757,12 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
           }
         }
         const patch: Record<string, unknown> = {};
+        // The appointment mirror is written SEPARATELY from `patch`, under a compare-and-swap — see the
+        // guarded write below. It is no longer the only writer of these six columns: the Leads-tab
+        // "Book call" flow (POST /api/leads/[id]/meetings) also stamps them the moment a booking lands,
+        // and everything here is computed from a sweep snapshot that can be ~200s old by the time this
+        // lead is reached (LOOP_DEADLINE_MS). Writing it unguarded would blank a booking made mid-loop.
+        const apptPatch: Record<string, unknown> = {};
         // Appointment mirror — GHL is the source ONLY for GHL-sourced bookings. Three cases:
         //  • a live GHL appointment → mirror it;
         //  • no GHL appointment but one was stored (ghl_appointment_id set) → the re-verify above
@@ -765,19 +771,19 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
         //    manually-entered meeting (appointment_at set, ghl_appointment_id null — e.g. a call booked
         //    outside GHL) that the mirror must never blank.
         if (appt) {
-          patch.ghl_appointment_id = appt.id;
-          patch.appointment_at = appt.startIso;
-          patch.appointment_end_at = appt.endIso;
-          patch.appointment_status = appt.status;
-          patch.appointment_title = appt.title;
-          patch.appointment_link = appt.link;
+          apptPatch.ghl_appointment_id = appt.id;
+          apptPatch.appointment_at = appt.startIso;
+          apptPatch.appointment_end_at = appt.endIso;
+          apptPatch.appointment_status = appt.status;
+          apptPatch.appointment_title = appt.title;
+          apptPatch.appointment_link = appt.link;
         } else if (row.ghl_appointment_id) {
-          patch.ghl_appointment_id = null;
-          patch.appointment_at = null;
-          patch.appointment_end_at = null;
-          patch.appointment_status = null;
-          patch.appointment_title = null;
-          patch.appointment_link = null;
+          apptPatch.ghl_appointment_id = null;
+          apptPatch.appointment_at = null;
+          apptPatch.appointment_end_at = null;
+          apptPatch.appointment_status = null;
+          apptPatch.appointment_title = null;
+          apptPatch.appointment_link = null;
         }
         // The lead's effective booking after this pass: the live GHL one, else (when no GHL booking was
         // stored) whatever manual appointment is on the row. Drives the auto states below.
@@ -1001,6 +1007,17 @@ export async function runLeadsSync(admin: SupabaseClient, tenantId: string): Pro
           } catch {
             /* tag write failed — the booking chip still shows; the next sync retries the tag */
           }
+        }
+        // Compare-and-swap on the appointment the snapshot was taken against, exactly like the task,
+        // notes and opportunity mirrors in this same loop. If the Book-call flow moved
+        // ghl_appointment_id since the sweep, this write becomes a no-op and the NEXT cycle reconciles
+        // from a sweep that actually contains the new booking. Without it, a call booked mid-loop is
+        // blanked out of the row for up to 30 minutes — and a row showing no meeting invites a second
+        // booking, which in this location fires the GHL opportunity workflow all over again.
+        if (Object.keys(apptPatch).length) {
+          const q = admin.from("leads").update(apptPatch).eq("id", row.id);
+          // `.eq(col, null)` never matches in SQL — the null case needs `.is()`.
+          await (row.ghl_appointment_id == null ? q.is("ghl_appointment_id", null) : q.eq("ghl_appointment_id", row.ghl_appointment_id));
         }
         if (Object.keys(patch).length) await admin.from("leads").update(patch).eq("id", row.id);
       } catch {

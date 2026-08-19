@@ -3,8 +3,8 @@ import { createServerSupabase } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getPrimaryTenantId } from "@/lib/tenant";
 import { ghlConfig, updateAppointmentStatus, fetchOpportunitiesByContact, updateOpportunityStatus, moveOpportunityToWonStage, createContactTask, completeContactTask } from "@/lib/ghl-write";
-import { listOpenContactTasks, fetchContactOpenTask } from "@/lib/ghl";
-import { ATTENDANCE_VALUES, OUTCOME_VALUES, DISQUALIFY_VALUES, outcomeAppliesTo, leadNeedsRebooking, REBOOK_TASK_TITLE, REBOOK_TASK_RE, type LeadMeeting } from "@/lib/meetings";
+import { listOpenContactTasks, fetchContactOpenTask, fetchCalendarEventsForContact } from "@/lib/ghl";
+import { ATTENDANCE_VALUES, OUTCOME_VALUES, DISQUALIFY_VALUES, outcomeAppliesTo, leadNeedsRebooking, REBOOK_TASK_TITLE, REBOOK_TASK_RE, bookingCalendar, type LeadMeeting } from "@/lib/meetings";
 
 export const runtime = "nodejs";
 export const maxDuration = 30; // bound a hung GHL call so it can't hold the function to the platform limit
@@ -53,7 +53,7 @@ async function resolve(params: Promise<{ id: string }>) {
   const admin = createAdminClient();
   const { data: lead } = await admin
     .from("leads")
-    .select("id, ghl_contact_id, ghl_opportunity_id, opportunity_won_at")
+    .select("id, ghl_contact_id, ghl_opportunity_id, opportunity_won_at, ghl_appointment_id, appointment_at")
     .eq("tenant_id", tenantId)
     .eq("id", id)
     .is("deleted_at", null)
@@ -66,6 +66,8 @@ async function resolve(params: Promise<{ id: string }>) {
     contactId: (lead.ghl_contact_id as string | null) ?? null,
     opportunityId: (lead.ghl_opportunity_id as string | null) ?? null,
     wonAt: (lead.opportunity_won_at as string | null) ?? null,
+    apptId: (lead.ghl_appointment_id as string | null) ?? null,
+    apptAt: (lead.appointment_at as string | null) ?? null,
   };
 }
 
@@ -297,4 +299,147 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 
   return NextResponse.json({ ok: true, meeting: toView(data), ghlWarning });
+}
+
+/**
+ * Did the booking land? — the other half of the Leads-tab "Book call" action.
+ *
+ * The operator books in GoHighLevel's own widget (that is deliberate: every downstream GHL workflow —
+ * the opportunity, its "Booked Call - Discovery/Follow-up" stage, the confirmation messages, the
+ * no-show flows — hangs off a real widget booking, and an API-created appointment is not proven to
+ * fire them). The cost of that choice is that the dashboard would normally learn about the booking
+ * only on the next 30-minute sync. This closes that gap: the client polls here while the widget is
+ * open, and the moment the booking exists we materialise it locally.
+ *
+ * Read-only against GoHighLevel — this NEVER creates or modifies a calendar event. It reports what is
+ * already there and mirrors it into `lead_meetings` exactly as the sync would.
+ *
+ * Body: `{ calendarId, knownAppointmentIds?: string[] }` — the ids the client already knew about before
+ * it opened the widget, so "new" means new to the operator, not new to the database.
+ * Returns `{ ok: true, meeting: LeadMeeting | null }`; `null` simply means "not yet, keep waiting".
+ */
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const r = await resolve(params);
+  if ("error" in r) return r.error;
+  if (!ghlConfig()) return NextResponse.json({ error: "GoHighLevel isn't configured." }, { status: 400 });
+  if (!r.contactId) return NextResponse.json({ error: "This lead isn't linked to a GoHighLevel contact." }, { status: 409 });
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
+  }
+  const calendarId = typeof body.calendarId === "string" ? body.calendarId.trim() : "";
+  // Whitelisted, not free-form: this id is interpolated into a GHL URL, and only the location's own
+  // calendars can ever be polled.
+  if (!bookingCalendar(calendarId)) return NextResponse.json({ error: "Unknown calendar." }, { status: 400 });
+  const known = new Set(
+    Array.isArray(body.knownAppointmentIds) ? body.knownAppointmentIds.filter((v): v is string => typeof v === "string") : []
+  );
+
+  let events;
+  try {
+    events = await fetchCalendarEventsForContact(calendarId, r.contactId);
+  } catch (e) {
+    console.warn("booking poll failed:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ error: "Couldn't reach the GoHighLevel calendar." }, { status: 502 });
+  }
+
+  // Baseline pass — what is already on this calendar for this contact, written nowhere. The client
+  // takes this before it opens the widget so that "new" means "appeared while we were watching".
+  //
+  // Deliberately NOT derived from our own lead_meetings rows: a booking the lead made for themselves
+  // minutes ago exists in GoHighLevel but not yet here (the mirror runs every 30 min), and baselining
+  // against our DB would report that older booking as the one the operator just made — announcing a
+  // call that isn't the one on screen.
+  if (body.baseline === true) {
+    return NextResponse.json({ ok: true, appointmentIds: events.filter((e) => !e.dead).map((e) => e.id) });
+  }
+
+  // A cancelled event is not a booking. Of the genuinely new ones, take the EARLIEST upcoming: if the
+  // operator fat-fingered two slots, the one they'll actually attend is the first.
+  const fresh = events
+    .filter((e) => !e.dead && !known.has(e.id))
+    .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+  const ev = fresh[0];
+  if (!ev) return NextResponse.json({ ok: true, meeting: null });
+
+  const now = new Date().toISOString();
+  const base: Record<string, unknown> = {
+    tenant_id: r.tenantId,
+    lead_id: r.id,
+    ghl_appointment_id: ev.id, // ALWAYS the real id — this is what lets the sync's unique index
+    ghl_contact_id: r.contactId, // recognise this row as the same booking instead of inserting a second
+    starts_at: ev.startTime,
+    ends_at: ev.endTime,
+    title: ev.title,
+    link: ev.link,
+    calendar_id: ev.calendarId ?? calendarId,
+    last_seen_at: now,
+    updated_at: now,
+  };
+
+  let row;
+  try {
+    const { data: existing } = await r.admin
+      .from("lead_meetings")
+      .select("id")
+      .eq("lead_id", r.id)
+      .eq("ghl_appointment_id", ev.id)
+      .maybeSingle();
+    // The sync may have got here first — that's a success, not a conflict.
+    if (existing) {
+      const { data, error } = await r.admin.from("lead_meetings").update(base).eq("id", existing.id).select("*").single();
+      if (error) throw new Error(error.message);
+      row = data;
+    } else {
+      // 'scheduled' and nothing else: the mirror rewrites attendance from GHL on every cycle unless a
+      // human has ruled (outcome_set_at), and stamping outcome_set_at here would freeze a judgement
+      // nobody has made. A brand-new booking IS scheduled, so the two agree and there is nothing to
+      // overwrite.
+      const { data, error } = await r.admin.from("lead_meetings").insert({ ...base, attendance: "scheduled" }).select("*").single();
+      if (error) throw new Error(error.message);
+      row = data;
+    }
+  } catch (e) {
+    console.error("booking materialise failed:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ error: "The call was booked in GoHighLevel, but this dashboard couldn't record it. It'll appear after the next sync." }, { status: 500 });
+  }
+
+  // Light the Meeting chip NOW. The chip reads the `leads.appointment_*` mirror, not `lead_meetings`,
+  // so without this the row stays blank until the next sync even though the history row exists.
+  //
+  // Only when this booking is the one `pickRelevantAppointment` would ALSO choose — next upcoming,
+  // else most recent past. Writing the mirror on any future booking looks right until the lead has two
+  // live calls: booking a follow-up for Friday while a discovery sits on Tuesday would point the row at
+  // Friday, and since "Confirm tomorrow's call" reads the mirror, Tuesday's confirmation nudge would
+  // silently disappear until the next sync put it back.
+  const stored = r.apptAt ? new Date(r.apptAt).getTime() : NaN;
+  const isRelevant =
+    !r.apptId || // nothing mirrored yet
+    r.apptId === ev.id || // the same booking, moved or re-read
+    !(stored > Date.now()) || // what's mirrored is past (or unparseable) — an upcoming call outranks it
+    new Date(ev.startTime).getTime() < stored; // sooner than what's mirrored
+  if (new Date(ev.startTime).getTime() > Date.now() && isRelevant) {
+    try {
+      await r.admin
+        .from("leads")
+        .update({
+          ghl_appointment_id: ev.id,
+          appointment_at: ev.startTime,
+          appointment_end_at: ev.endTime,
+          appointment_status: ev.status,
+          appointment_title: ev.title,
+          appointment_link: ev.link,
+        })
+        .eq("tenant_id", r.tenantId)
+        .eq("id", r.id);
+    } catch (e) {
+      // Cosmetic only — the sync mirrors it within 30 minutes regardless.
+      console.warn("appointment mirror patch failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  return NextResponse.json({ ok: true, meeting: toView(row) });
 }

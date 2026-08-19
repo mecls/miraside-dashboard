@@ -337,6 +337,52 @@ export async function fetchAppointmentsByContact(): Promise<Map<string, SweepEve
 }
 
 /**
+ * Live bookings for ONE contact on ONE calendar — the narrow read behind "did the booking land?".
+ *
+ * Deliberately the per-CALENDAR endpoint filtered client-side, not `/contacts/{id}/appointments`:
+ * that per-contact list intermittently returns [] for contacts whose bookings demonstrably exist
+ * (the 2026-07-19 wipe), and a false empty here would mean the Book-call flow reports "no booking
+ * found" seconds after the operator made one. This is the same endpoint GHL's own UI runs on.
+ *
+ * One calendar (the one the operator just booked on) and a tight window, so a poll costs one request.
+ * Throws on failure — the caller decides whether a miss is fatal or just "keep waiting".
+ */
+export async function fetchCalendarEventsForContact(calendarId: string, contactId: string): Promise<SweepEvent[]> {
+  const cfg = ghlCfg();
+  if (!cfg) return [];
+  const headers = { Authorization: `Bearer ${cfg.key}`, Version: GHL_VERSION, Accept: "application/json" };
+  // −1d covers a booking made moments ago whose slot is today; +180d matches the sweep's forward
+  // horizon, so anything this finds is something the 30-minute mirror would also have found.
+  const startMs = Date.now() - 86_400_000;
+  const endMs = Date.now() + 180 * 86_400_000;
+  const j: any = await withGhlRetry(async () => {
+    const res = await ghlRead(
+      `${GHL_BASE}/calendars/events?locationId=${encodeURIComponent(cfg.location)}&calendarId=${encodeURIComponent(calendarId)}&startTime=${startMs}&endTime=${endMs}`,
+      { headers }
+    );
+    if (!res.ok) throw new Error(`GHL calendars/events ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+    return res.json();
+  });
+  const out: SweepEvent[] = [];
+  for (const e of (Array.isArray(j?.events) ? j.events : []) as any[]) {
+    if (!e?.id || !e?.startTime || String(e.contactId ?? "") !== contactId) continue;
+    const dead = e.deleted === true || DEAD_APPT_STATUS.has(String(e.appointmentStatus ?? "").toLowerCase());
+    const address = typeof e.address === "string" && /^https?:\/\//i.test(e.address.trim()) ? e.address.trim() : null;
+    out.push({
+      id: String(e.id),
+      startTime: String(e.startTime),
+      endTime: e.endTime ? String(e.endTime) : null,
+      status: e.appointmentStatus ? String(e.appointmentStatus) : null,
+      title: e.title ? String(e.title) : null,
+      link: address,
+      calendarId: e.calendarId ? String(e.calendarId) : calendarId,
+      dead,
+    });
+  }
+  return out;
+}
+
+/**
  * Pick the relevant booking from a contact's candidates: next upcoming, else most recent past.
  * Handles both time shapes GHL emits — ISO with offset (parseable) and naive location-local strings
  * (compared lexicographically against "now" rendered in Europe/Lisbon; single-location app).

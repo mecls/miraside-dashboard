@@ -114,19 +114,102 @@ export function rescheduleUrl(m: { ghlAppointmentId: string | null; calendarId: 
 export const FOLLOW_UP_CALENDAR_ID = "423UMdjxJoj43dS930AQ";
 
 /**
- * Follow-up booking page with the lead's details pre-filled, so booking the next call is pick-a-slot
- * and done. Prefill via query params verified LIVE on this widget (2026-07-22): first_name / last_name /
- * email land in the form fields. The follow-up form has no phone field today — the param rides along
- * harmlessly in case one is added.
+ * The location's bookable calendars, read live from `GET /calendars/?locationId=…` on 2026-08-18.
+ *
+ * Hardcoded rather than fetched: the picker must render instantly with the row, the set changes maybe
+ * once a year, and a failed fetch would leave the operator with an empty menu mid-call. `id` is the
+ * contract — the widget URL and every `lead_meetings.calendar_id` key off it.
+ *
+ * `common` marks the three calendars that carry real traffic (live booking counts at the time of
+ * writing: Sessão de Estratégia 22, Follow-up 9, AI Audit 1, the other three zero). The picker shows
+ * those first and files the rest under a divider, so the list reads as "what you actually book".
+ *
+ * NOTE: nothing here is named "Discovery" — in this location the discovery call IS
+ * "Sessão de Estratégia de IA". The pipeline stage it feeds is "Booked Call - Discovery".
  */
-export function followUpBookingUrl(c: { firstName?: string | null; lastName?: string | null; email?: string | null; phone?: string | null }): string {
+export interface BookingCalendar {
+  id: string;
+  /** Exactly as it reads in GoHighLevel — renaming it here would make the two systems disagree. */
+  name: string;
+  /** What this call IS, for an operator scanning the menu mid-call. */
+  hint: string;
+  minutes: number;
+  common: boolean;
+}
+export const BOOKING_CALENDARS: BookingCalendar[] = [
+  { id: "fXnSMAnSS2QsGMfmHIkN", name: "Sessão de Estratégia de IA", hint: "Discovery — the PT first call", minutes: 30, common: true },
+  { id: FOLLOW_UP_CALENDAR_ID, name: "Follow-up Call", hint: "The second call, after a discovery", minutes: 30, common: true },
+  { id: "47V7G6Pg8rcagBLwdi3W", name: "AI Audit Call", hint: "Walk them through their audit", minutes: 30, common: true },
+  { id: "AxjqJSF3L6GZkt9s7HRU", name: "Onboarding Call", hint: "Kick-off, after they sign", minutes: 30, common: false },
+  { id: "mZJkEAcaC4HuCEo0Mfw9", name: "Intro Call", hint: "Short intro", minutes: 30, common: false },
+  { id: "wBhfgwiGQk1MtvplzNpU", name: "AI Strategy Call", hint: "Strategy, in English", minutes: 30, common: false },
+];
+
+/** The discovery calendar — the default for a lead that has never sat on a call. */
+export const DISCOVERY_CALENDAR_ID = "fXnSMAnSS2QsGMfmHIkN";
+/** Kick-off, once they're a client. */
+export const ONBOARDING_CALENDAR_ID = "AxjqJSF3L6GZkt9s7HRU";
+
+export function bookingCalendar(id: string): BookingCalendar | null {
+  return BOOKING_CALENDARS.find((c) => c.id === id) ?? null;
+}
+
+/**
+ * Which call this lead most likely needs next — the picker's pre-selection, never a lock: every
+ * calendar stays one click away.
+ *
+ * Won → onboarding (they're a client, the next call is kick-off).
+ * Sat on a call → follow-up (the existing "Book follow-up" button encodes exactly this rule).
+ * Anything else, including a lead whose only booking was missed → discovery: a no-show never had the
+ * first call, so the call they still owe is the first one.
+ */
+export function suggestedCalendarId(lead: {
+  latestAttendance?: Attendance | null;
+  latestOutcome?: MeetingOutcome | null;
+  opportunityStatus?: string | null;
+}): string {
+  if (lead.opportunityStatus === "won" || lead.latestOutcome === "won") return ONBOARDING_CALENDAR_ID;
+  if (lead.latestAttendance === "showed") return FOLLOW_UP_CALENDAR_ID;
+  return DISCOVERY_CALENDAR_ID;
+}
+
+/** The contact details the booking form can take off our hands. */
+export interface BookingContact {
+  firstName?: string | null;
+  lastName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  website?: string | null;
+}
+
+/**
+ * A GoHighLevel booking page with the lead's details pre-filled, so booking is pick-a-slot and done.
+ *
+ * Param names verified LIVE against the real discovery widget (2026-08-18, stepping the form open in a
+ * browser): `first_name`, `last_name`, `email`, `phone` and `website` all land in their fields. Phone
+ * MUST be E.164 with the `+` — the widget's intl-tel-input parses `+351912345678` into "912 345 678"
+ * with the country flag set, and drops the number entirely if the prefix is missing.
+ *
+ * Params are omitted when falsy: an empty `email=` would render as a filled-in blank the operator has
+ * to clear. Forms that lack a given field simply ignore its param.
+ */
+export function bookingUrl(calendarId: string, c: BookingContact): string {
   const p = new URLSearchParams();
   if (c.firstName) p.set("first_name", c.firstName);
   if (c.lastName) p.set("last_name", c.lastName);
   if (c.email) p.set("email", c.email);
   if (c.phone) p.set("phone", c.phone);
+  if (c.website) p.set("website", c.website);
   const q = p.toString();
-  return `${GHL_WIDGET_BASE}/widget/booking/${FOLLOW_UP_CALENDAR_ID}${q ? `?${q}` : ""}`;
+  return `${GHL_WIDGET_BASE}/widget/booking/${encodeURIComponent(calendarId)}${q ? `?${q}` : ""}`;
+}
+
+/**
+ * The follow-up booking page. Unchanged behaviour — kept as its own export because the post-call
+ * "Book follow-up ↗" button is built on it and must not shift.
+ */
+export function followUpBookingUrl(c: BookingContact): string {
+  return bookingUrl(FOLLOW_UP_CALENDAR_ID, c);
 }
 
 /** GoHighLevel's appointmentStatus → our attendance. Unknown/`new` reads as still-scheduled. */
